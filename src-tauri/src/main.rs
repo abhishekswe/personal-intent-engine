@@ -515,8 +515,8 @@ fn list_models(state: State<'_, AppState>) -> Vec<models::ModelInfo> {
 /// Point the relevant setting at an already-downloaded catalog model.
 #[tauri::command]
 fn select_model(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let (kind, _url, path) = models::resolve(&id).ok_or("Unknown model")?;
-    if !path.exists() {
+    let (kind, path) = models::resolve(&id).ok_or("Unknown model")?;
+    if !models::is_downloaded(&id) {
         return Err("Model isn't downloaded yet".to_string());
     }
     let path_str = path.to_string_lossy().into_owned();
@@ -542,8 +542,8 @@ fn select_model(app: AppHandle, state: State<'_, AppState>, id: String) -> Resul
 /// Delete a downloaded model file. Refuses if the model is currently selected.
 #[tauri::command]
 fn delete_model(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let (kind, _url, path) = models::resolve(&id).ok_or("Unknown model")?;
-    if !path.exists() {
+    let (kind, path) = models::resolve(&id).ok_or("Unknown model")?;
+    if !models::is_downloaded(&id) {
         return Err("Model isn't downloaded".to_string());
     }
 
@@ -558,7 +558,7 @@ fn delete_model(app: AppHandle, state: State<'_, AppState>, id: String) -> Resul
     }
     drop(settings);
 
-    std::fs::remove_file(&path).map_err(|e| format!("Failed to delete {}: {e}", path.display()))?;
+    models::remove(&id).map_err(|e| format!("Failed to delete {}: {e}", path.display()))?;
     log::info!("Deleted model: {}", path.display());
     emit_event(&app, "pie://models-changed", ());
     Ok(())
@@ -580,11 +580,17 @@ async fn download_model(app: AppHandle, id: String) -> Result<(), String> {
         error: Option<String>,
     }
 
-    let (_kind, url, dest) = models::resolve(&id).ok_or("Unknown model")?;
+    if models::resolve(&id).is_none() {
+        return Err("Unknown model".to_string());
+    }
 
     // Throttle progress events to ~10/s so the event channel isn't flooded.
+    // Also track the latest counts (unthrottled) so the final "done" event
+    // reports accurate totals across the model's whole fileset.
     let mut last_emit = Instant::now();
-    let result = models::download_to(url, &dest, |received, total| {
+    let mut last_counts = (0u64, 0u64);
+    let result = models::download_model(&id, |received, total| {
+        last_counts = (received, total);
         if last_emit.elapsed() >= Duration::from_millis(100) {
             last_emit = Instant::now();
             emit_event(
@@ -603,14 +609,15 @@ async fn download_model(app: AppHandle, id: String) -> Result<(), String> {
     .await;
 
     match result {
-        Ok(received) => {
+        Ok(_path) => {
+            let (received, total) = last_counts;
             emit_event(
                 &app,
                 "pie://download",
                 Progress {
                     id: id.clone(),
                     received,
-                    total: received,
+                    total: total.max(received),
                     done: true,
                     error: None,
                 },
