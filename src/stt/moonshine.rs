@@ -3,10 +3,14 @@
 
 use std::borrow::Cow;
 use std::path::Path;
+use std::sync::Mutex;
 
 use ndarray::{Array1, Array2, Array3, Array4};
 use ort::session::{builder::GraphOptimizationLevel, Session, SessionInputValue};
 use ort::value::Value;
+use tokenizers::Tokenizer;
+
+use crate::stt::SttEngine;
 
 /// Decoder start-of-sequence token id.
 const DECODER_START: i64 = 1;
@@ -166,6 +170,66 @@ impl MoonshineModel {
     }
 }
 
+/// A ready-to-use Moonshine STT engine: an ONNX model plus its tokenizer.
+///
+/// The underlying `MoonshineModel::generate` requires `&mut self` (`ort`
+/// sessions need a mutable borrow to run), but `SttEngine::transcribe` takes
+/// `&self`. A `Mutex` reconciles the two: it also gives us `Sync` for free,
+/// which `SttEngine: Send + Sync` requires.
+pub struct MoonshineEngine {
+    model: Mutex<MoonshineModel>,
+    tokenizer: Tokenizer,
+}
+
+impl MoonshineEngine {
+    /// Load the Moonshine model and its tokenizer from `dir`.
+    ///
+    /// `dir` must contain `encoder_model.onnx`, `decoder_model_merged.onnx`,
+    /// and `tokenizer.json`.
+    pub fn load(model_id: &str, dir: &Path) -> anyhow::Result<Self> {
+        let model = MoonshineModel::load(model_id, dir)?;
+        let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json"))
+            .map_err(|e| anyhow::anyhow!("tokenizer load: {e}"))?;
+        Ok(Self {
+            model: Mutex::new(model),
+            tokenizer,
+        })
+    }
+}
+
+impl SttEngine for MoonshineEngine {
+    fn transcribe(&self, samples: &[f32]) -> anyhow::Result<String> {
+        let tokens = {
+            let mut m = self
+                .model
+                .lock()
+                .map_err(|_| anyhow::anyhow!("moonshine model lock poisoned"))?;
+            m.generate(samples)?
+        };
+        let ids: Vec<u32> = tokens
+            .iter()
+            .filter(|&&t| t != DECODER_START && t != EOS && t >= 0)
+            .map(|&t| t as u32)
+            .collect();
+        let text = self
+            .tokenizer
+            .decode(&ids, true)
+            .map_err(|e| anyhow::anyhow!("decode: {e}"))?;
+        Ok(text.trim().to_string())
+    }
+
+    fn is_ready(&self) -> bool {
+        true
+    }
+}
+
+#[cfg(test)]
+fn _assert_send_sync<T: Send + Sync>() {}
+#[cfg(test)]
+fn _moonshine_engine_is_send_sync() {
+    _assert_send_sync::<MoonshineEngine>();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,6 +256,25 @@ mod tests {
         assert!(
             toks.last() == Some(&EOS) || toks.len() > 3,
             "should decode some tokens"
+        );
+    }
+
+    #[test]
+    fn transcribe_hello_fixture() {
+        let Some(dir) = base_dir() else {
+            eprintln!("skip: no local base model");
+            return;
+        };
+        let eng = MoonshineEngine::load("moonshine-base", &dir).unwrap();
+        assert!(eng.is_ready());
+        let samples = crate::stt::load_wav_as_16k_mono(std::path::Path::new(
+            "tests/fixtures/moonshine_hello.wav",
+        ))
+        .unwrap();
+        let text = eng.transcribe(&samples).unwrap().to_lowercase();
+        assert!(
+            text.contains("hello") && text.contains("test"),
+            "got: {text}"
         );
     }
 }
