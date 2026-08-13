@@ -1,7 +1,11 @@
+#[cfg(feature = "vad")]
+pub mod moonshine;
 pub mod stream;
 #[cfg(feature = "whisper")]
 pub mod whisper;
 
+#[cfg(feature = "vad")]
+pub use moonshine::MoonshineModel;
 pub use stream::{StreamCmd, TranscriptRouter};
 #[cfg(feature = "whisper")]
 pub use whisper::WhisperEngine;
