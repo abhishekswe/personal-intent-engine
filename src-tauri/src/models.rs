@@ -24,8 +24,9 @@ use crate::settings::Settings;
 #[derive(Clone, Copy, PartialEq)]
 pub enum ModelKind {
     /// Speech-to-text model. Historically Whisper GGML; now Moonshine ONNX
-    /// filesets. Kept as `Whisper` to match the existing
-    /// `Settings::whisper_model` field name that callers key off of.
+    /// filesets. Kept named `Whisper` here — renaming this variant is out of
+    /// scope for this change; `Settings::stt_model` is the field callers key
+    /// off of.
     Whisper,
     Vad,
 }
@@ -204,9 +205,11 @@ pub fn list_models(settings: &Settings) -> Vec<ModelInfo> {
         .map(|e| {
             let path = entry_path(e);
             let path_str = path.to_string_lossy().into_owned();
-            let selected_setting = match e.kind {
-                ModelKind::Whisper => &settings.whisper_model,
-                ModelKind::Vad => &settings.silero_model,
+            // STT selection is stored as a catalog id (`settings.stt_model`);
+            // VAD selection is stored as an expanded path.
+            let selected = match e.kind {
+                ModelKind::Whisper => settings.stt_model == e.id,
+                ModelKind::Vad => Settings::expand(&settings.silero_model) == path,
             };
             ModelInfo {
                 id: e.id.to_string(),
@@ -215,7 +218,7 @@ pub fn list_models(settings: &Settings) -> Vec<ModelInfo> {
                 kind: e.kind.as_str().to_string(),
                 size_mb: e.size_mb,
                 downloaded: entry_is_downloaded(e),
-                selected: Settings::expand(selected_setting) == path,
+                selected,
                 path: path_str,
             }
         })

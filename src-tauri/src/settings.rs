@@ -6,8 +6,11 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// Path to the whisper GGML/GGUF model
-    pub whisper_model: String,
+    /// Catalog id of the selected speech-to-text model (e.g.
+    /// `"moonshine-base"`), not a path — the engine loads it by id from its
+    /// directory under `~/.cache/pie/models/<id>/`. A stale `whisper_model`
+    /// key from older installs is ignored (serde default).
+    pub stt_model: String,
     /// Path to the Silero VAD ONNX model (empty = record without VAD)
     pub silero_model: String,
     /// Spoken language code or "auto"
@@ -48,7 +51,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            whisper_model: existing_cache_model("ggml-tiny.en.bin"),
+            stt_model: "moonshine-base".to_string(),
             silero_model: existing_cache_model("silero_vad_v4.onnx"),
             language: "auto".to_string(),
             // "auto" = engine selects direct/enhanced from input complexity.
@@ -150,14 +153,29 @@ mod tests {
     #[test]
     fn settings_roundtrip_json() {
         let settings = Settings {
-            whisper_model: "/tmp/model.bin".into(),
+            stt_model: "moonshine-tiny".into(),
             mode: "enhanced".into(),
             ..Settings::default()
         };
         let json = serde_json::to_string(&settings).unwrap();
         let loaded: Settings = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded.whisper_model, "/tmp/model.bin");
+        assert_eq!(loaded.stt_model, "moonshine-tiny");
         assert_eq!(loaded.mode, "enhanced");
+    }
+
+    #[test]
+    fn stt_model_defaults_to_moonshine_base() {
+        let s = Settings::default();
+        assert_eq!(s.stt_model, "moonshine-base");
+    }
+
+    #[test]
+    fn stale_whisper_model_key_is_ignored() {
+        // Older installs persisted `whisper_model`; it's not a field anymore,
+        // so it's silently dropped and `stt_model` falls back to default.
+        let loaded: Settings =
+            serde_json::from_str(r#"{"whisper_model":"/tmp/ggml-tiny.en.bin"}"#).unwrap();
+        assert_eq!(loaded.stt_model, "moonshine-base");
     }
 
     #[test]

@@ -24,7 +24,7 @@ use pie_engine::audio::{
     VAD_STREAM_HANGOVER_FRAMES,
 };
 use pie_engine::history::{HistoryStore, NewEntry};
-use pie_engine::stt::{SttEngine, WhisperEngine};
+use pie_engine::stt::{MoonshineEngine, SttEngine};
 use pie_engine::PieEngine;
 use settings::Settings;
 
@@ -40,9 +40,11 @@ struct AppState {
     /// True from stop until processing finishes; the hotkey ignores presses
     /// while set so a double-tap can't start a session mid-decode.
     busy: AtomicBool,
-    /// Loaded whisper engine, cached with the (path, language) it was built
-    /// from so a settings change reloads it.
-    whisper: Mutex<Option<(PathBuf, String, Arc<WhisperEngine>)>>,
+    /// Loaded Moonshine STT engine, cached with the catalog model id it was
+    /// built from so a settings change (a different model selected) reloads
+    /// it. Moonshine has no language parameter (English-only), so unlike the
+    /// old whisper cache this is keyed by id alone.
+    stt: Mutex<Option<(String, Arc<MoonshineEngine>)>>,
     /// Text pipeline: intent -> memory -> optimizer -> LLM router.
     engine: tokio::sync::Mutex<PieEngine>,
     /// Local SQLite history of recordings.
@@ -191,10 +193,10 @@ async fn transcribe_and_process(app: &AppHandle, samples: Vec<f32>) -> Result<Ou
         .unwrap_or_else(|e| e.into_inner())
         .clone();
 
-    // 2. Transcribe on a blocking thread (Metal/CPU inference).
-    let whisper = get_or_load_whisper(&state, &settings)?;
+    // 2. Transcribe on a blocking thread (CPU/accelerated ONNX inference).
+    let stt = get_or_load_stt(&state, &settings)?;
     let transcript = tauri::async_runtime::spawn_blocking(move || {
-        whisper.transcribe(&samples).map(|t| t.trim().to_string())
+        stt.transcribe(&samples).map(|t| t.trim().to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -523,18 +525,20 @@ fn select_model(app: AppHandle, state: State<'_, AppState>, id: String) -> Resul
     let settings = {
         let mut settings = state.settings.lock().unwrap_or_else(|e| e.into_inner());
         match kind {
-            models::ModelKind::Whisper => settings.whisper_model = path_str,
+            // STT selection stores the catalog *id*, not a path — MoonshineEngine
+            // loads by id + its models_dir()/<id>/ directory.
+            models::ModelKind::Whisper => settings.stt_model = id.clone(),
             models::ModelKind::Vad => settings.silero_model = path_str,
         }
         settings.clone()
     };
     settings.save().map_err(|e| e.to_string())?;
     emit_event(&app, "pie://models-changed", ());
-    // Warm the newly selected whisper model in the background so it's hot before
+    // Warm the newly selected STT model in the background so it's hot before
     // first use. VAD selection doesn't need this — the VAD cache loads on the
     // next recording start regardless.
     if matches!(kind, models::ModelKind::Whisper) {
-        warm_whisper(&app);
+        warm_stt(&app);
     }
     Ok(())
 }
@@ -547,13 +551,14 @@ fn delete_model(app: AppHandle, state: State<'_, AppState>, id: String) -> Resul
         return Err("Model isn't downloaded".to_string());
     }
 
-    // Block deletion of the active model.
+    // Block deletion of the active model. STT selection is stored as a
+    // catalog id (compare directly); VAD selection is stored as a path.
     let settings = state.settings.lock().unwrap_or_else(|e| e.into_inner());
-    let selected_path = match kind {
-        models::ModelKind::Whisper => Settings::expand(&settings.whisper_model),
-        models::ModelKind::Vad => Settings::expand(&settings.silero_model),
+    let in_use = match kind {
+        models::ModelKind::Whisper => settings.stt_model == id,
+        models::ModelKind::Vad => Settings::expand(&settings.silero_model) == path,
     };
-    if selected_path == path {
+    if in_use {
         return Err("Can't delete the model currently in use".to_string());
     }
     drop(settings);
@@ -990,36 +995,37 @@ fn llm_config(s: &Settings) -> pie_engine::llm::LlmConfig {
     }
 }
 
-/// Load (or reuse) the whisper engine for the configured model + language.
-fn get_or_load_whisper(
+/// Load (or reuse) the Moonshine STT engine for the configured model id.
+fn get_or_load_stt(
     state: &State<'_, AppState>,
     settings: &Settings,
-) -> Result<Arc<WhisperEngine>, String> {
-    if settings.whisper_model.is_empty() {
-        return Err("No whisper model configured. Set one in Settings (e.g. \
-             ~/.cache/pie/models/ggml-tiny.en.bin)."
-            .to_string());
+) -> Result<Arc<MoonshineEngine>, String> {
+    if settings.stt_model.is_empty() {
+        return Err("No speech-to-text model configured. Pick one in Settings.".to_string());
     }
-    let path = Settings::expand(&settings.whisper_model);
+    let (_, dir) = models::resolve(&settings.stt_model).ok_or("Unknown STT model")?;
+    if !models::is_downloaded(&settings.stt_model) {
+        return Err("STT model not downloaded".to_string());
+    }
 
-    let mut cache = state.whisper.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((cached_path, cached_lang, engine)) = cache.as_ref() {
-        if *cached_path == path && *cached_lang == settings.language {
+    let mut cache = state.stt.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((cached_id, engine)) = cache.as_ref() {
+        if *cached_id == settings.stt_model {
             return Ok(Arc::clone(engine));
         }
     }
 
     let engine =
-        Arc::new(WhisperEngine::load(&path, &settings.language).map_err(|e| e.to_string())?);
-    *cache = Some((path, settings.language.clone(), Arc::clone(&engine)));
+        Arc::new(MoonshineEngine::load(&settings.stt_model, &dir).map_err(|e| e.to_string())?);
+    *cache = Some((settings.stt_model.clone(), Arc::clone(&engine)));
     Ok(engine)
 }
 
-/// Load the configured whisper model into the cache on a background thread so
+/// Load the configured STT model into the cache on a background thread so
 /// the first transcription of a session isn't cold. Non-blocking, silent, and
 /// best-effort: a no-op when no model is configured, and a logged warning on
 /// failure (the next real transcription falls back to the lazy load).
-fn warm_whisper(app: &AppHandle) {
+fn warm_stt(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
@@ -1028,12 +1034,12 @@ fn warm_whisper(app: &AppHandle) {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        if settings.whisper_model.is_empty() {
+        if settings.stt_model.is_empty() {
             return;
         }
-        match get_or_load_whisper(&state, &settings) {
-            Ok(_) => log::info!("Whisper model warmed"),
-            Err(e) => log::warn!("Whisper warm-up failed (will load on first use): {e}"),
+        match get_or_load_stt(&state, &settings) {
+            Ok(_) => log::info!("STT model warmed"),
+            Err(e) => log::warn!("STT warm-up failed (will load on first use): {e}"),
         }
     });
 }
@@ -1137,7 +1143,7 @@ fn main() {
                 recorder: Mutex::new(None),
                 vad_cache: Mutex::new(VadCache::new()),
                 busy: AtomicBool::new(false),
-                whisper: Mutex::new(None),
+                stt: Mutex::new(None),
                 engine: tokio::sync::Mutex::new(engine),
                 history: Mutex::new(history),
                 pending_paste_mode: Mutex::new(default_paste_mode),
@@ -1232,9 +1238,9 @@ fn main() {
                 })
                 .build(app)?;
 
-            // Warm the whisper model off the launch path so the first
+            // Warm the STT model off the launch path so the first
             // transcription isn't cold. Non-blocking.
-            warm_whisper(app.handle());
+            warm_stt(app.handle());
 
             Ok(())
         })

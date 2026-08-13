@@ -26,7 +26,7 @@
   let hasLevel = $state(false);
 
   let settings = $state({
-    whisper_model: "",
+    stt_model: "",
     silero_model: "",
     language: "auto",
     mode: "auto",

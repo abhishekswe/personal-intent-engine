@@ -71,12 +71,12 @@
   </summary>
   <div class="disclosure-body">
     <div class="field">
-      <label for="whisper">Whisper model path</label>
+      <label for="stt">Speech-to-text model id</label>
       <input
-        id="whisper"
-        bind:value={settings.whisper_model}
+        id="stt"
+        bind:value={settings.stt_model}
         onblur={() => { onSave(); onReloadModels(); }}
-        placeholder="~/.cache/pie/models/ggml-tiny.en.bin"
+        placeholder="moonshine-base"
       />
     </div>
     <div class="field">
