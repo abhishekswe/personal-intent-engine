@@ -225,3 +225,8 @@ Thanks to both projects for doing the hard parts in the open. Their copyright no
 ## License
 
 Distributed under the [Apache 2.0 License](LICENSE), with derived portions under MIT as recorded in [NOTICE](NOTICE).
+
+
+---
+
+Built by **Abhishek Kumar** ([@abhishekswe](https://github.com/abhishekswe)) · [abhishekswe.github.io](https://abhishekswe.github.io) · [LinkedIn](https://www.linkedin.com/in/abhishekkr-swe/) · [X](https://x.com/abhishekswe)
