@@ -7,7 +7,7 @@ version = "0.5.0"
 edition = "2021"
 description = "PIE - Personal Intent Engine: Intelligent middleware between humans and AI models"
 license = "Apache-2.0"
-repository = "https://github.com/abhishek-data/personal-intent-engine"
+repository = "https://github.com/abhishekswe/personal-intent-engine"
 authors = ["Abhishek Kumar"]
 
 [lib]
