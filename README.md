@@ -75,23 +75,23 @@ Builds are signed with a **stable self-signed certificate** (not an Apple Develo
 
 ```bash
 # One-line install: downloads the latest release, installs to /Applications, clears quarantine
-curl -fsSL https://raw.githubusercontent.com/abhishek-data/personal-intent-engine/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/abhishekswe/personal-intent-engine/main/scripts/install.sh | bash
 ```
 
 To review the script before running it, download it first with `-o install.sh`, read it, then `bash install.sh`.
 
 Alternatively, via **Homebrew**:
 ```bash
-brew tap abhishek-data/pie https://github.com/abhishek-data/homebrew-pie
-brew install --cask abhishek-data/pie/pie
+brew tap abhishekswe/pie https://github.com/abhishekswe/homebrew-pie
+brew install --cask abhishekswe/pie/pie
 xattr -cr /Applications/PIE.app
 ```
 
-> **Manual Install**: Download `PIE_<version>_aarch64.dmg` from [Releases](https://github.com/abhishek-data/personal-intent-engine/releases), move to `/Applications`, then run `xattr -cr /Applications/PIE.app` (or right-click → **Open** the first time).
+> **Manual Install**: Download `PIE_<version>_aarch64.dmg` from [Releases](https://github.com/abhishekswe/personal-intent-engine/releases), move to `/Applications`, then run `xattr -cr /Applications/PIE.app` (or right-click → **Open** the first time).
 
 ### Windows
 
-Download the latest `.exe` installer from [Releases](https://github.com/abhishek-data/personal-intent-engine/releases). SmartScreen may warn about an unrecognized app — click **More info → Run anyway**.
+Download the latest `.exe` installer from [Releases](https://github.com/abhishekswe/personal-intent-engine/releases). SmartScreen may warn about an unrecognized app — click **More info → Run anyway**.
 
 ---
 
@@ -108,7 +108,7 @@ Download the latest `.exe` installer from [Releases](https://github.com/abhishek
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/abhishek-data/personal-intent-engine.git
+git clone https://github.com/abhishekswe/personal-intent-engine.git
 cd personal-intent-engine
 
 # 2. Install Tauri CLI
