@@ -4,14 +4,14 @@
 # block the (ad-hoc signed) app on first launch.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/abhishek-data/personal-intent-engine/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/abhishekswe/personal-intent-engine/main/scripts/install.sh | bash
 #
 # Or, to review first:
-#   curl -fsSL https://raw.githubusercontent.com/abhishek-data/personal-intent-engine/main/scripts/install.sh -o install.sh
+#   curl -fsSL https://raw.githubusercontent.com/abhishekswe/personal-intent-engine/main/scripts/install.sh -o install.sh
 #   less install.sh && bash install.sh
 set -euo pipefail
 
-OWNER="abhishek-data"
+OWNER="abhishekswe"
 REPO="personal-intent-engine"
 APP_NAME="PIE"
 APP_BUNDLE="${APP_NAME}.app"
