@@ -311,6 +311,36 @@ impl PieEngine {
         })
     }
 
+    /// Fast voice-to-text path: apply ONLY pronunciation correction (dictionary
+    /// + context-gated phonetic + learned vocab, plus code-phrase translation
+    /// when code mode is on). No intent extraction, no optimization, no LLM
+    /// call, and no memory writes — so it stays instant regardless of input
+    /// length. Returns the corrected transcript and the fixes that were applied.
+    /// Used as the default flow; `process` is the opt-in AI-enhanced path.
+    pub fn correct_only(&mut self, input: &str) -> (String, Vec<AppliedFix>) {
+        // Pick up anything the background learner mined and any on-disk change.
+        self.drain_mined();
+        self.maybe_reload_learned();
+
+        let allowed: std::collections::HashSet<String> = self
+            .memory
+            .profile
+            .technologies
+            .iter()
+            .map(|t| t.to_lowercase())
+            .collect();
+        let correction = self.corrector.correct(input, &allowed);
+        let corrected = if self.code_mode {
+            crate::corrector::code_phrases::apply_code_phrases(&correction.text)
+        } else {
+            correction.text.clone()
+        };
+        for fix in &correction.applied {
+            let _ = self.corrector.reinforce_learned(&fix.from);
+        }
+        (corrected, correction.applied)
+    }
+
     /// User context string for LLM intent extraction, from the memory profile.
     /// `None` when the profile has nothing useful to add.
     fn extraction_context(&self) -> Option<String> {

@@ -40,6 +40,7 @@
     history_limit: 10,
     deep_correct_ai: false,
     code_mode: false,
+    enhance_with_ai: false,
   });
   let saved = $state(false);
   let savedTimer;

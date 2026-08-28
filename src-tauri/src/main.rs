@@ -206,62 +206,91 @@ async fn transcribe_and_process(app: &AppHandle, samples: Vec<f32>) -> Result<Ou
         return Err("Transcription produced no text (silence?)".to_string());
     }
 
-    // 3. Intent + optimization through the shared pipeline.
-    let mut engine = state.engine.lock().await;
-    let result = engine
-        .process(&transcript, &settings.mode)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Opt-in deep correction (off the always-on path): re-run the LLM pass over
-    // the deterministic result and fold in any extra fixes it finds. Never
-    // fails the recording — an LLM error just falls back to the deterministic
-    // transcript already computed above.
+    // 3. Turn the transcript into the pasted text.
     //
-    // Skip it in code mode: the transcript here already contains translated code
-    // syntax ("console.log(", "==="), and deep-correct is a *pronunciation*
-    // fixer — running it over syntax would likely undo the translation. The two
-    // opt-ins don't compose, so code mode wins.
-    let (final_transcript, applied_fixes) = if settings.deep_correct_ai && !settings.code_mode {
-        match engine
-            .deep_correct(
-                &result.corrected_transcript,
-                &settings.provider,
-                model_opt(&settings),
-            )
+    // DEFAULT (enhance_with_ai off): pure voice-to-text — pronunciation
+    // correction only, NO intent extraction / optimization / LLM call. This is
+    // the fast path (~tens of ms) and never touches a model, so long dictations
+    // stay instant.
+    //
+    // OPT-IN (enhance_with_ai on): the full AI pipeline — intent extraction +
+    // prompt optimization (which may call the configured LLM) plus the optional
+    // deep-correct pass. Slower, and only runs when the user asks for it.
+    let outcome = if settings.enhance_with_ai {
+        let mut engine = state.engine.lock().await;
+        let result = engine
+            .process(&transcript, &settings.mode)
             .await
-        {
-            Ok(deep) => {
-                let mut applied = result.applied.clone();
-                applied.extend(deep.applied);
-                (deep.text, applied)
+            .map_err(|e| e.to_string())?;
+
+        // Opt-in deep correction. Skip in code mode: the transcript already
+        // contains translated code syntax, which a pronunciation fixer would
+        // likely undo.
+        let (final_transcript, applied_fixes) = if settings.deep_correct_ai && !settings.code_mode {
+            match engine
+                .deep_correct(
+                    &result.corrected_transcript,
+                    &settings.provider,
+                    model_opt(&settings),
+                )
+                .await
+            {
+                Ok(deep) => {
+                    let mut applied = result.applied.clone();
+                    applied.extend(deep.applied);
+                    (deep.text, applied)
+                }
+                Err(e) => {
+                    log::warn!("deep-correct failed, using deterministic result: {e}");
+                    (result.corrected_transcript.clone(), result.applied.clone())
+                }
             }
-            Err(e) => {
-                log::warn!("deep-correct failed, using deterministic result: {e}");
-                (result.corrected_transcript.clone(), result.applied.clone())
-            }
+        } else {
+            (result.corrected_transcript.clone(), result.applied.clone())
+        };
+        drop(engine);
+
+        Outcome {
+            transcript: final_transcript,
+            objective: result.intent.objective,
+            conversation_type: format!("{:?}", result.intent.conversation_type),
+            confidence: format!("{:?}", result.intent.confidence),
+            optimized_prompt: result.optimized_prompt,
+            estimated_tokens: result.estimated_tokens,
+            mode: format!("{:?}", result.mode),
+            applied: applied_fixes
+                .iter()
+                .map(|f| AppliedFixDto {
+                    from: f.from.clone(),
+                    to: f.to.clone(),
+                    tier: format!("{:?}", f.tier),
+                })
+                .collect(),
         }
     } else {
-        (result.corrected_transcript.clone(), result.applied.clone())
-    };
-    drop(engine);
-
-    let outcome = Outcome {
-        transcript: final_transcript,
-        objective: result.intent.objective,
-        conversation_type: format!("{:?}", result.intent.conversation_type),
-        confidence: format!("{:?}", result.intent.confidence),
-        optimized_prompt: result.optimized_prompt,
-        estimated_tokens: result.estimated_tokens,
-        mode: format!("{:?}", result.mode),
-        applied: applied_fixes
-            .iter()
-            .map(|f| AppliedFixDto {
-                from: f.from.clone(),
-                to: f.to.clone(),
-                tier: format!("{:?}", f.tier),
-            })
-            .collect(),
+        // Fast path: correction only, no model in the loop.
+        let mut engine = state.engine.lock().await;
+        let (corrected, applied) = engine.correct_only(&transcript);
+        drop(engine);
+        Outcome {
+            transcript: corrected.clone(),
+            objective: String::new(),
+            conversation_type: String::new(),
+            confidence: String::new(),
+            // No AI rewrite — the "optimized" output is just the corrected text,
+            // so either paste hotkey yields the same fast voice-to-text.
+            optimized_prompt: corrected,
+            estimated_tokens: 0,
+            mode: "voice-to-text".to_string(),
+            applied: applied
+                .iter()
+                .map(|f| AppliedFixDto {
+                    from: f.from.clone(),
+                    to: f.to.clone(),
+                    tier: format!("{:?}", f.tier),
+                })
+                .collect(),
+        }
     };
 
     // Best-effort history capture — never fail the recording over it.

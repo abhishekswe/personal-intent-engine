@@ -153,4 +153,22 @@
       </span>
     </label>
   </div>
+
+  <div class="field">
+    <label class="check-row">
+      <input
+        type="checkbox"
+        bind:checked={settings.enhance_with_ai}
+        onchange={onSave}
+      />
+      <span>
+        <span class="field-label">Enhance with AI</span>
+        <span class="note">
+          Off (default) = instant voice-to-text: transcribe + word correction,
+          no model call. On = rewrite dictation into a structured prompt using
+          your configured LLM. Slower — only turn on when you want the AI rewrite.
+        </span>
+      </span>
+    </label>
+  </div>
 </section>

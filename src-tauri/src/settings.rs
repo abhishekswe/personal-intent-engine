@@ -46,6 +46,12 @@ pub struct Settings {
     /// -> "console.log(") after pronunciation correction. Off by default so
     /// ordinary dictation is never affected.
     pub code_mode: bool,
+    /// When true, run the LLM enhancement pipeline (intent extraction +
+    /// prompt optimization, and any opt-in deep-correct) after transcription.
+    /// OFF by default: the default flow is pure voice-to-text — transcribe +
+    /// dictionary correction + paste — with NO model/LLM call in the path, so
+    /// it stays instant. Turning this on opts into the (slower) AI rewrite.
+    pub enhance_with_ai: bool,
 }
 
 impl Default for Settings {
@@ -68,6 +74,7 @@ impl Default for Settings {
             deep_correct_ai: false,
             background_mining: false,
             code_mode: false,
+            enhance_with_ai: false,
         }
     }
 }
