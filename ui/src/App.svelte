@@ -8,8 +8,6 @@
   import ModelManager from "./lib/ModelManager.svelte";
   import TranscriptionSettings from "./lib/TranscriptionSettings.svelte";
   import LLMSettings from "./lib/LLMSettings.svelte";
-  import OutputSettings from "./lib/OutputSettings.svelte";
-  import HotkeyRecorder from "./lib/HotkeyRecorder.svelte";
   import HistorySettings from "./lib/HistorySettings.svelte";
   import VocabularySettings from "./lib/VocabularySettings.svelte";
   import VocabularySync from "./lib/VocabularySync.svelte";
@@ -34,9 +32,6 @@
     llm_api_url: "",
     llm_api_key: "",
     llm_model: "",
-    hotkey_raw: "CmdOrCtrl+Shift+V",
-    hotkey_optimized: "CmdOrCtrl+Shift+Space",
-    paste_output: "transcript",
     history_limit: 10,
     deep_correct_ai: false,
     code_mode: false,
@@ -243,7 +238,6 @@
       {llmBusy}
       {level}
       {hasLevel}
-      hotkey={settings.hotkey_optimized}
       {stateLabel}
       onToggle={toggleRecording}
       onCancel={cancelRecording}
@@ -269,16 +263,23 @@
       onReloadModels={loadModels}
     />
   {:else if view === "setup"}
-    <!-- The two global hotkeys are the product, so they open the section
-         rather than sitting fifth in a flat list. -->
-    <HotkeyRecorder {settings} onSave={save} onError={(e) => { error = e; }}
-      field="hotkey_optimized" label="Optimized paste hotkey" defaultValue="CmdOrCtrl+Shift+Space" />
-    <HotkeyRecorder {settings} onSave={save} onError={(e) => { error = e; }}
-      field="hotkey_raw" label="Raw paste hotkey" defaultValue="CmdOrCtrl+Shift+V"
-      showNote={false} />
+    <!-- Hold ⌥ to talk is the whole interaction, so it opens the section. -->
+    <section class="leaf">
+      <div class="leaf-head">
+        <span class="leaf-label">How to talk</span>
+        <span class="leaf-rule"></span>
+      </div>
+      <div class="field">
+        <span class="keys keys-hero"><kbd>⌥</kbd></span>
+        <p class="note">
+          Hold the Option (⌥) key to record, release to paste at your cursor.
+          Works in any app. Turn on “Enhance with AI” in Lexicon to paste an
+          AI-rewritten prompt instead of the plain transcript.
+        </p>
+      </div>
+    </section>
     <TranscriptionSettings {settings} onSave={save} />
     <LLMSettings {settings} onSave={save} />
-    <OutputSettings {settings} onSave={save} />
     <HistorySettings {settings} onSave={save} />
   {/if}
 </main>

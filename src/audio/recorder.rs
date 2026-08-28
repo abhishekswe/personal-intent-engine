@@ -5,7 +5,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::vad::{VadFrame, VadPolicy, VoiceActivityDetector};
-use super::{AudioResampler, FRAME_DURATION_MS, FRAME_SAMPLES, WHISPER_SAMPLE_RATE};
+use super::{AudioResampler, FRAME_DURATION_MS, FRAME_SAMPLES, STT_SAMPLE_RATE};
 
 /// Commands for the audio worker thread
 enum Cmd {
@@ -465,13 +465,13 @@ fn run_consumer(
 ) {
     let mut resampler = AudioResampler::new(
         in_sample_rate as usize,
-        WHISPER_SAMPLE_RATE,
+        STT_SAMPLE_RATE,
         Duration::from_millis(FRAME_DURATION_MS as u64),
     );
 
     // Pre-size for a few seconds of speech so a typical recording accumulates
     // without repeated reallocation; it still grows for longer sessions.
-    let mut processed_samples = Vec::<f32>::with_capacity(WHISPER_SAMPLE_RATE * 4);
+    let mut processed_samples = Vec::<f32>::with_capacity(STT_SAMPLE_RATE * 4);
     let mut recording = false;
     let mut vad_policy = VadPolicy::Offline;
 

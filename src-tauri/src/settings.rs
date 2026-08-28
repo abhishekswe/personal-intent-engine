@@ -25,16 +25,6 @@ pub struct Settings {
     pub llm_api_url: String,
     /// API key / bearer token for BYOK (empty = none / local server).
     pub llm_api_key: String,
-    /// Global shortcut that pastes the raw transcript
-    /// (tauri-plugin-global-shortcut syntax, e.g. "CmdOrCtrl+Shift+V").
-    pub hotkey_raw: String,
-    /// Global shortcut that pastes the PIE-optimized prompt
-    /// (tauri-plugin-global-shortcut syntax, e.g. "CmdOrCtrl+Shift+Space").
-    pub hotkey_optimized: String,
-    /// Default output for the UI record button (and the fallback paste mode):
-    /// "transcript" (raw speech-to-text) or "prompt" (PIE-optimized prompt).
-    /// The two hotkeys override this per-press.
-    pub paste_output: String,
     /// Max number of recordings kept in the history store (hard cap).
     pub history_limit: usize,
     /// When true, run the opt-in LLM deep-correct pass on every transcript.
@@ -67,9 +57,6 @@ impl Default for Settings {
             llm_model: String::new(),
             llm_api_url: String::new(),
             llm_api_key: String::new(),
-            hotkey_raw: "CmdOrCtrl+Shift+V".to_string(),
-            hotkey_optimized: "CmdOrCtrl+Shift+Space".to_string(),
-            paste_output: "transcript".to_string(),
             history_limit: 10,
             deep_correct_ai: false,
             background_mining: false,
@@ -103,34 +90,14 @@ impl Settings {
     pub fn load() -> Self {
         let path = settings_path();
         match std::fs::read_to_string(&path) {
-            Ok(json) => Self::from_json_migrating(&json),
+            // Unknown/legacy keys (old `hotkey*`, `paste_output`, ...) are
+            // ignored by serde; missing keys fall back to defaults.
+            Ok(json) => serde_json::from_str(&json).unwrap_or_else(|e| {
+                log::warn!("Failed to parse settings ({e}); using defaults");
+                Self::default()
+            }),
             Err(_) => Self::default(),
         }
-    }
-
-    /// Parse settings JSON, migrating a legacy single `hotkey` into the dual
-    /// hotkeys based on the legacy `paste_output` (`"prompt"` -> optimized,
-    /// otherwise raw). New installs (no legacy `hotkey`) keep the defaults.
-    pub fn from_json_migrating(json: &str) -> Self {
-        let mut s: Settings = serde_json::from_str(json).unwrap_or_else(|e| {
-            log::warn!("Failed to parse settings ({e}); using defaults");
-            Self::default()
-        });
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(json) {
-            let has_new = v.get("hotkey_raw").is_some() || v.get("hotkey_optimized").is_some();
-            if let (false, Some(legacy)) = (has_new, v.get("hotkey").and_then(|h| h.as_str())) {
-                if !legacy.trim().is_empty() {
-                    let to_prompt =
-                        v.get("paste_output").and_then(|p| p.as_str()) == Some("prompt");
-                    if to_prompt {
-                        s.hotkey_optimized = legacy.to_string();
-                    } else {
-                        s.hotkey_raw = legacy.to_string();
-                    }
-                }
-            }
-        }
-        s
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -214,32 +181,14 @@ mod tests {
     }
 
     #[test]
-    fn dual_hotkey_defaults() {
-        let s = Settings::default();
-        assert_eq!(s.hotkey_raw, "CmdOrCtrl+Shift+V");
-        assert_eq!(s.hotkey_optimized, "CmdOrCtrl+Shift+Space");
-    }
-
-    #[test]
-    fn migrates_legacy_hotkey_by_paste_output() {
-        // Legacy install: single hotkey + paste_output=prompt -> optimized.
-        let legacy = r#"{"hotkey":"CmdOrCtrl+Alt+P","paste_output":"prompt"}"#;
-        let migrated = Settings::from_json_migrating(legacy);
-        assert_eq!(migrated.hotkey_optimized, "CmdOrCtrl+Alt+P");
-        assert_eq!(migrated.hotkey_raw, "CmdOrCtrl+Shift+V"); // default keeps
-
-        // Legacy install: single hotkey + paste_output=transcript -> raw.
-        let legacy2 = r#"{"hotkey":"CmdOrCtrl+Alt+R","paste_output":"transcript"}"#;
-        let m2 = Settings::from_json_migrating(legacy2);
-        assert_eq!(m2.hotkey_raw, "CmdOrCtrl+Alt+R");
-        assert_eq!(m2.hotkey_optimized, "CmdOrCtrl+Shift+Space"); // default keeps
-    }
-
-    #[test]
-    fn new_install_no_legacy_key_uses_defaults() {
-        let s = Settings::from_json_migrating(r#"{"mode":"balanced"}"#);
-        assert_eq!(s.hotkey_raw, "CmdOrCtrl+Shift+V");
-        assert_eq!(s.hotkey_optimized, "CmdOrCtrl+Shift+Space");
+    fn legacy_hotkey_keys_are_ignored() {
+        // Old installs persisted `hotkey*` / `paste_output`; those keys no
+        // longer exist, so serde drops them and parsing still succeeds.
+        let loaded: Settings = serde_json::from_str(
+            r#"{"hotkey_raw":"CmdOrCtrl+Shift+V","paste_output":"prompt","mode":"compact"}"#,
+        )
+        .unwrap();
+        assert_eq!(loaded.mode, "compact");
     }
 
     #[test]

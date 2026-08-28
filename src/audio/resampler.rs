@@ -6,7 +6,7 @@ const RESAMPLER_CHUNK_SIZE: usize = 1024;
 /// Streaming resampler that converts mono audio to the target rate and emits
 /// fixed-duration frames (e.g. 30 ms / 480 samples at 16 kHz) via a callback.
 ///
-/// Frame-based resampler: accepts native-rate frames, outputs 16kHz for whisper.
+/// Frame-based resampler: accepts native-rate frames, outputs 16kHz for STT.
 /// - `push()` buffers input and processes full chunks, emitting complete frames
 /// - `finish()` flushes the buffered remainder (zero-padded) so no tail audio
 ///   is lost at the end of a recording

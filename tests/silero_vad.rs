@@ -2,13 +2,12 @@
 //! speech as speech and digital silence as noise, through the VadPipeline
 //! wrapper exactly as the recorder uses it.
 //!
-//! Requires the `vad` + `whisper` features (whisper for the WAV loader),
-//! macOS (`say`/`afconvert`), and the Silero model in the cache. Skips
-//! cleanly when those are missing.
+//! Requires the `vad` feature, macOS (`say`/`afconvert`), and the Silero model
+//! in the cache. Skips cleanly when those are missing.
 //!
-//! Run with: cargo test --features whisper,vad --test silero_vad
+//! Run with: cargo test --features vad --test silero_vad
 
-#![cfg(all(feature = "vad", feature = "whisper", target_os = "macos"))]
+#![cfg(all(feature = "vad", target_os = "macos"))]
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -17,6 +16,21 @@ use pie_engine::audio::{
     SileroVad, VadFrame, VadPipeline, VoiceActivityDetector, FRAME_SAMPLES, PIE_VAD_THRESHOLD,
     VAD_CONTEXT_FRAMES, VAD_HANGOVER_FRAMES, VAD_SPEECH_THRESHOLD_FRAMES,
 };
+
+/// Read a 16 kHz mono 16-bit PCM WAV (what `afconvert -d LEI16@16000 -c 1`
+/// produces) into f32 samples. Test-only, via the `hound` dev-dependency —
+/// the shipped library carries no WAV loader.
+fn load_wav_16k_mono(path: &std::path::Path) -> Vec<f32> {
+    let mut reader = hound::WavReader::open(path).expect("wav open failed");
+    let spec = reader.spec();
+    assert_eq!(spec.channels, 1, "expected mono");
+    assert_eq!(spec.sample_rate, 16000, "expected 16 kHz");
+    let max = (1i64 << (spec.bits_per_sample - 1)) as f32;
+    reader
+        .samples::<i32>()
+        .map(|s| s.expect("wav sample read failed") as f32 / max)
+        .collect()
+}
 
 fn model_path() -> Option<PathBuf> {
     let path = std::env::var_os("PIE_SILERO_MODEL")
@@ -81,7 +95,7 @@ fn detects_speech_and_rejects_silence() {
         .expect("afconvert unavailable");
     assert!(status.success(), "afconvert failed");
 
-    let speech_samples = pie_engine::stt::load_wav_as_16k_mono(&wav).expect("wav load failed");
+    let speech_samples = load_wav_16k_mono(&wav);
     let mut vad = smoothed_silero(&model);
     let (speech, total) = count_speech_frames(&mut vad, &speech_samples);
     assert!(

@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod hold_key;
 mod models;
 #[cfg(target_os = "macos")]
 mod nspanel;
@@ -15,7 +16,6 @@ use serde::Serialize;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 use paste::EnigoState;
 use pie_engine::audio::{
@@ -49,11 +49,6 @@ struct AppState {
     engine: tokio::sync::Mutex<PieEngine>,
     /// Local SQLite history of recordings.
     history: Mutex<HistoryStore>,
-    /// Paste mode captured when the current recording started: "transcript" or
-    /// "prompt". Set from the hotkey that fired (raw vs optimized), or from
-    /// `settings.paste_output` for the UI record button. Read by the stop/paste
-    /// path and the refine gate.
-    pending_paste_mode: Mutex<String>,
 }
 
 /// Result payload for the frontend after a recording is processed.
@@ -121,10 +116,6 @@ fn do_start_recording(app: &AppHandle) -> Result<(), String> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    // NOTE: the paste mode for this recording is set by the caller before
-    // starting — on_hotkey_with_mode sets the hotkey's mode; the UI
-    // `start_recording` command sets `settings.paste_output`. do_start_recording
-    // must NOT touch pending_paste_mode or it would clobber the hotkey's choice.
     let (mut recorder, vad_active) = {
         let mut vad_cache = state.vad_cache.lock().unwrap_or_else(|e| e.into_inner());
         build_recorder(app, &settings, &mut vad_cache).map_err(|e| e.to_string())?
@@ -315,37 +306,36 @@ async fn transcribe_and_process(app: &AppHandle, samples: Vec<f32>) -> Result<Ou
     Ok(outcome)
 }
 
-/* ─── global hotkey ─── */
+/* ─── push-to-talk (hold ⌥) ─── */
 
-/// Toggle handler carrying a paste mode: first press starts recording (and
-/// records which output this hotkey wants — "transcript" or "prompt"), second
-/// press stops, transcribes, and pastes that output into the focused app.
-fn on_hotkey_with_mode(app: &AppHandle, mode: &str) {
-    let Some(state) = app.try_state::<AppState>() else {
-        log::error!("on_hotkey: app state unavailable");
-        return;
-    };
-    let recording = state
-        .recorder
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .is_some();
-    log::debug!("on_hotkey: recording={recording} mode={mode}");
-
-    if !recording {
-        // Capture the paste mode for this recording BEFORE starting, so the
-        // stop/paste path (and the refine gate) use the mode this hotkey wants.
-        *state
-            .pending_paste_mode
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = mode.to_string();
-        if let Err(e) = do_start_recording(app) {
-            log::warn!("Hotkey start failed: {e}");
-            emit_event(app, "pie://error", e);
-        }
-        return;
+/// Start a push-to-talk recording. Errors (already recording, still busy) are
+/// expected under key-repeat and only logged.
+#[cfg(target_os = "macos")]
+pub(crate) fn ptt_start(app: &AppHandle) {
+    if let Err(e) = do_start_recording(app) {
+        log::debug!("PTT start skipped: {e}");
     }
+}
 
+/// Release of ⌥ while a PTT recording is live: stop, transcribe, and paste.
+#[cfg(target_os = "macos")]
+pub(crate) fn ptt_stop(app: &AppHandle) {
+    spawn_stop_and_paste(app);
+}
+
+/// Abort a PTT recording without transcribing (a key was pressed mid-hold, so
+/// the user was typing a ⌥ shortcut rather than dictating).
+#[cfg(target_os = "macos")]
+pub(crate) fn ptt_cancel(app: &AppHandle) {
+    do_cancel_recording(app);
+}
+
+/// Stop the active recording, transcribe/process it, then paste the result into
+/// whichever app has focus. The pasted text is the AI-optimized prompt when
+/// "Enhance with AI" is on, and the corrected voice-to-text transcript
+/// otherwise (the two are identical on the fast path).
+#[cfg(target_os = "macos")]
+fn spawn_stop_and_paste(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         match do_stop_recording(app.clone()).await {
@@ -355,15 +345,15 @@ fn on_hotkey_with_mode(app: &AppHandle, mode: &str) {
 
                 // ... and paste into whichever app has focus.
                 let Some(state) = app.try_state::<AppState>() else {
-                    log::error!("hotkey paste: app state unavailable");
+                    log::error!("paste: app state unavailable");
                     return;
                 };
-                let paste_mode = state
-                    .pending_paste_mode
+                let enhance = state
+                    .settings
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                let text = if paste_mode == "prompt" {
+                    .enhance_with_ai;
+                let text = if enhance {
                     outcome.optimized_prompt
                 } else {
                     outcome.transcript
@@ -382,59 +372,11 @@ fn on_hotkey_with_mode(app: &AppHandle, mode: &str) {
                 }
             }
             Err(e) => {
-                log::warn!("Hotkey stop failed: {e}");
+                log::warn!("Stop failed: {e}");
                 emit_event(&app, "pie://error", e);
             }
         }
     });
-}
-
-/// (Re-)register BOTH global hotkeys from settings. Clears all existing
-/// bindings first, then registers each; an invalid or empty binding is logged
-/// and skipped — never fatal, and one bad hotkey never blocks the other.
-fn register_hotkeys(app: &AppHandle, settings: &Settings) -> Result<(), String> {
-    let _ = app.global_shortcut().unregister_all();
-    register_one(app, &settings.hotkey_raw, "transcript");
-    // If both hotkeys resolve to the same combo (e.g. a legacy install whose
-    // single hotkey migrated into `hotkey_raw` while `hotkey_optimized` kept its
-    // identical default), register only the first — a double registration of one
-    // shortcut is ambiguous. Raw wins, preserving the legacy transcript output.
-    let opt = settings.hotkey_optimized.trim();
-    if !opt.is_empty() && opt == settings.hotkey_raw.trim() {
-        log::warn!("optimized hotkey equals the raw hotkey ('{opt}'); skipping the optimized binding so the raw/transcript hotkey wins — rebind one in Settings");
-    } else {
-        register_one(app, &settings.hotkey_optimized, "prompt");
-    }
-    Ok(())
-}
-
-/// Register one shortcut bound to a paste `mode`. Empty = disabled; a parse or
-/// registration failure is logged and skipped (non-fatal).
-fn register_one(app: &AppHandle, hotkey: &str, mode: &'static str) {
-    let trimmed = hotkey.trim();
-    if trimmed.is_empty() {
-        log::info!("Hotkey ({mode}) disabled");
-        return;
-    }
-    let shortcut: Shortcut = match trimmed.parse() {
-        Ok(s) => s,
-        Err(e) => {
-            log::error!("Invalid hotkey '{hotkey}' ({mode}): {e}");
-            return;
-        }
-    };
-    let res = app
-        .global_shortcut()
-        .on_shortcut(shortcut, move |app, fired, event| {
-            if event.state() == ShortcutState::Pressed {
-                log::debug!("Hotkey fired ({mode}): {fired:?}");
-                on_hotkey_with_mode(app, mode);
-            }
-        });
-    match res {
-        Ok(()) => log::info!("Hotkey registered ({mode}): {hotkey}"),
-        Err(e) => log::error!("Failed to register hotkey '{hotkey}' ({mode}): {e}"),
-    }
 }
 
 /* ─── commands ─── */
@@ -450,20 +392,9 @@ fn get_settings(state: State<'_, AppState>) -> Settings {
 
 #[tauri::command]
 async fn update_settings(
-    app: AppHandle,
     state: State<'_, AppState>,
     settings: Settings,
 ) -> Result<(), String> {
-    let hotkeys_changed = {
-        let current = state.settings.lock().unwrap_or_else(|e| e.into_inner());
-        current.hotkey_raw != settings.hotkey_raw
-            || current.hotkey_optimized != settings.hotkey_optimized
-    };
-    // Re-register both hotkeys when either changed. Registration is non-fatal
-    // (a bad binding is logged and skipped), so this can't fail the save.
-    if hotkeys_changed {
-        register_hotkeys(&app, &settings)?;
-    }
     let (llm_changed, code_mode_changed) = {
         let current = state.settings.lock().unwrap_or_else(|e| e.into_inner());
         let llm = current.llm_api_url != settings.llm_api_url
@@ -485,44 +416,8 @@ async fn update_settings(
     Ok(())
 }
 
-/// Suspend (active=false) or restore (active=true) the global hotkey. The
-/// Settings shortcut recorder suspends it while capturing so the current
-/// binding doesn't fire on the keys being pressed to choose a new one.
-#[tauri::command]
-fn set_hotkey_active(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    active: bool,
-) -> Result<(), String> {
-    if active {
-        let settings = state
-            .settings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        register_hotkeys(&app, &settings)
-    } else {
-        app.global_shortcut()
-            .unregister_all()
-            .map_err(|e| e.to_string())
-    }
-}
-
 #[tauri::command]
 fn start_recording(app: AppHandle) -> Result<(), String> {
-    // UI record button: paste the configured default output.
-    if let Some(state) = app.try_state::<AppState>() {
-        let default_mode = state
-            .settings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .paste_output
-            .clone();
-        *state
-            .pending_paste_mode
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = default_mode;
-    }
     do_start_recording(&app)
 }
 
@@ -556,7 +451,7 @@ fn select_model(app: AppHandle, state: State<'_, AppState>, id: String) -> Resul
         match kind {
             // STT selection stores the catalog *id*, not a path — MoonshineEngine
             // loads by id + its models_dir()/<id>/ directory.
-            models::ModelKind::Whisper => settings.stt_model = id.clone(),
+            models::ModelKind::Stt => settings.stt_model = id.clone(),
             models::ModelKind::Vad => settings.silero_model = path_str,
         }
         settings.clone()
@@ -566,7 +461,7 @@ fn select_model(app: AppHandle, state: State<'_, AppState>, id: String) -> Resul
     // Warm the newly selected STT model in the background so it's hot before
     // first use. VAD selection doesn't need this — the VAD cache loads on the
     // next recording start regardless.
-    if matches!(kind, models::ModelKind::Whisper) {
+    if matches!(kind, models::ModelKind::Stt) {
         warm_stt(&app);
     }
     Ok(())
@@ -584,7 +479,7 @@ fn delete_model(app: AppHandle, state: State<'_, AppState>, id: String) -> Resul
     // catalog id (compare directly); VAD selection is stored as a path.
     let settings = state.settings.lock().unwrap_or_else(|e| e.into_inner());
     let in_use = match kind {
-        models::ModelKind::Whisper => settings.stt_model == id,
+        models::ModelKind::Stt => settings.stt_model == id,
         models::ModelKind::Vad => Settings::expand(&settings.silero_model) == path,
     };
     if in_use {
@@ -1138,9 +1033,8 @@ fn main() {
     env_logger::init();
 
     #[allow(unused_mut)]
-    let mut builder = tauri::Builder::default()
-        .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build());
+    let mut builder =
+        tauri::Builder::default().plugin(tauri_plugin_clipboard_manager::init());
     // macOS overlay is an NSPanel created directly in overlay.rs (see the
     // vendored nspanel module) — no external plugin needed.
 
@@ -1150,8 +1044,6 @@ fn main() {
             let mut engine =
                 tauri::async_runtime::block_on(PieEngine::with_config(&llm_config(&settings)))?;
             engine.set_code_mode(settings.code_mode);
-            let default_paste_mode = settings.paste_output.clone();
-            let settings_for_hotkeys = settings.clone();
             let history_path = dirs::config_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join("pie")
@@ -1175,7 +1067,6 @@ fn main() {
                 stt: Mutex::new(None),
                 engine: tokio::sync::Mutex::new(engine),
                 history: Mutex::new(history),
-                pending_paste_mode: Mutex::new(default_paste_mode),
             });
             app.manage(EnigoState::new());
 
@@ -1211,10 +1102,8 @@ fn main() {
                 tauri::async_runtime::spawn(async move { learner.run().await });
             }
 
-            if let Err(e) = register_hotkeys(app.handle(), &settings_for_hotkeys) {
-                // A bad hotkey must not prevent the app from starting.
-                log::error!("{e}");
-            }
+            // Hold ⌥ to talk (push-to-talk). macOS-only; a no-op elsewhere.
+            hold_key::install(app.handle());
 
             // Floating indicator, created hidden and shown per recording state.
             // Creating the NSPanel overlay temporarily flips the app activation
@@ -1286,7 +1175,6 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             update_settings,
-            set_hotkey_active,
             start_recording,
             stop_recording,
             cancel_recording,
@@ -1314,28 +1202,4 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running PIE");
-}
-
-#[cfg(test)]
-mod tests {
-    use tauri_plugin_global_shortcut::Shortcut;
-
-    /// The recorder builds accelerators from modifier names + `event.code`.
-    /// Every shape it can produce must parse, or a captured hotkey would fail
-    /// to register.
-    #[test]
-    fn recorder_accelerators_parse() {
-        let cases = [
-            "Command+Shift+Space",
-            "Control+Alt+KeyK",
-            "Command+KeyL",
-            "Command+Digit1",
-            "Shift+ArrowUp",
-            "F5",
-            "CmdOrCtrl+Shift+Space", // the default
-        ];
-        for a in cases {
-            assert!(a.parse::<Shortcut>().is_ok(), "should parse: {a}");
-        }
-    }
 }

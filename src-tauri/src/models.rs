@@ -23,18 +23,16 @@ use crate::settings::Settings;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum ModelKind {
-    /// Speech-to-text model. Historically Whisper GGML; now Moonshine ONNX
-    /// filesets. Kept named `Whisper` here — renaming this variant is out of
-    /// scope for this change; `Settings::stt_model` is the field callers key
-    /// off of.
-    Whisper,
+    /// Speech-to-text model (Moonshine ONNX filesets). `Settings::stt_model`
+    /// is the field callers key off of.
+    Stt,
     Vad,
 }
 
 impl ModelKind {
     fn as_str(self) -> &'static str {
         match self {
-            ModelKind::Whisper => "whisper",
+            ModelKind::Stt => "stt",
             ModelKind::Vad => "vad",
         }
     }
@@ -78,7 +76,7 @@ const CATALOG: &[CatalogEntry] = &[
         id: "moonshine-tiny",
         name: "Moonshine Tiny",
         description: "Fastest, lowest accuracy. Good for testing.",
-        kind: ModelKind::Whisper,
+        kind: ModelKind::Stt,
         files: &[
             FileDef {
                 url: "https://huggingface.co/moonshine-ai/moonshine/resolve/main/onnx/merged/tiny/float/encoder_model.onnx",
@@ -107,7 +105,7 @@ const CATALOG: &[CatalogEntry] = &[
         id: "moonshine-base",
         name: "Moonshine Base",
         description: "Most accurate Moonshine model here; slower.",
-        kind: ModelKind::Whisper,
+        kind: ModelKind::Stt,
         files: &[
             FileDef {
                 url: "https://huggingface.co/moonshine-ai/moonshine/resolve/main/onnx/merged/base/float/encoder_model.onnx",
@@ -208,7 +206,7 @@ pub fn list_models(settings: &Settings) -> Vec<ModelInfo> {
             // STT selection is stored as a catalog id (`settings.stt_model`);
             // VAD selection is stored as an expanded path.
             let selected = match e.kind {
-                ModelKind::Whisper => settings.stt_model == e.id,
+                ModelKind::Stt => settings.stt_model == e.id,
                 ModelKind::Vad => Settings::expand(&settings.silero_model) == path,
             };
             ModelInfo {

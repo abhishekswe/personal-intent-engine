@@ -88,7 +88,7 @@
 {#if entries.length === 0}
   <div class="empty">
     <p class="empty-lead">No recordings yet.</p>
-    <p class="note">Press your hotkey or record to start.</p>
+    <p class="note">Hold ⌥ or record to start.</p>
   </div>
 {:else}
   <section class="leaf">

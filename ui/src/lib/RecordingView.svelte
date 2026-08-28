@@ -5,18 +5,13 @@
   // Your speech sets in the serif because it is human language; the prompt
   // and the model's reply set in mono because they are machine output.
   import { invoke } from "@tauri-apps/api/core";
-  import { keycaps } from "./keycaps.js";
   import Icon from "./Icon.svelte";
 
   let {
-    recState, outcome, llmResponse, llmBusy, hotkey, stateLabel,
+    recState, outcome, llmResponse, llmBusy, stateLabel,
     level = 0, hasLevel = false,
     onToggle, onCancel, onSend, onCopy, onRecorrect, onError,
   } = $props();
-
-  // Render the user's actual configured hotkey as keycaps (⌘ ⇧ Space); when the
-  // hotkey is disabled (empty) there is nothing to press, so the hint is hidden.
-  const caps = $derived(keycaps(hotkey));
 
   // Saving a fix the AI made moves it into the user's own dictionary, so the
   // dictionary tier catches it instantly next time (no LLM round-trip needed).
@@ -139,7 +134,7 @@
            This teaches the result's structure and gives the empty state
            something to be besides a void. -->
       <div class="placeholder">
-        <p class="placeholder-lead">Press record or your hotkey to start.</p>
+        <p class="placeholder-lead">Hold ⌥ or press record to start.</p>
         <dl class="guide">
           <div>
             <dt>Heard</dt>
@@ -171,12 +166,8 @@
   >
     {#if recState === "idle"}
       <div class="bar-keys">
-        {#if caps.length}
-          <span class="keys keys-hero">{#each caps as cap}<kbd>{cap}</kbd>{/each}</span>
-          <span class="bar-caption">press anywhere</span>
-        {:else}
-          <span class="bar-caption">No hotkey set — add one in Setup.</span>
-        {/if}
+        <span class="keys keys-hero"><kbd>⌥</kbd></span>
+        <span class="bar-caption">hold to talk</span>
       </div>
     {:else}
       <div class="bar-live">

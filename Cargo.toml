@@ -62,22 +62,16 @@ ndarray = { version = "0.17", optional = true }
 # text). default-features = false avoids pulling in an http client.
 tokenizers = { version = "0.20", default-features = false, features = ["onig"], optional = true }
 
-# WAV file reading for the CLI's --audio-file input (whisper feature only)
-hound = { version = "3", optional = true }
-
-# whisper.cpp bindings per platform (optional, feature-gated). Platform-specific
-# backend: Metal on macOS, CPU elsewhere.
-[target.'cfg(target_os = "macos")'.dependencies]
-transcribe-cpp = { version = "0.1.3", default-features = false, features = ["metal"], optional = true }
-
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-transcribe-cpp = { version = "0.1.3", default-features = false, optional = true }
-
 [features]
 default = ["cli"]
 cli = ["dep:clap"]
-whisper = ["dep:transcribe-cpp", "dep:hound"]
+# On-device speech-to-text (Moonshine ONNX) + the Silero VAD engine. Named for
+# historical reasons; enables the `ort`/`tokenizers`/`ndarray` STT stack.
 vad = ["dep:ort", "dep:ndarray", "dep:tokenizers"]
+
+[dev-dependencies]
+# Test-only WAV reader for the Moonshine STT fixtures — not shipped.
+hound = "3"
 
 [profile.release]
 opt-level = 3

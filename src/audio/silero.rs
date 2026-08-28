@@ -3,7 +3,7 @@ use std::path::Path;
 
 use super::silero_vad_engine::SileroVadEngine;
 use super::vad::{VadFrame, VoiceActivityDetector};
-use super::{FRAME_SAMPLES, WHISPER_SAMPLE_RATE};
+use super::{FRAME_SAMPLES, STT_SAMPLE_RATE};
 
 /// Default speech probability threshold, empirically tuned for speech detection.
 pub const PIE_VAD_THRESHOLD: f32 = 0.3;
@@ -27,7 +27,7 @@ impl SileroVad {
         }
 
         Ok(Self {
-            engine: SileroVadEngine::new(&model_path, WHISPER_SAMPLE_RATE)?,
+            engine: SileroVadEngine::new(&model_path, STT_SAMPLE_RATE)?,
             threshold,
         })
     }

@@ -240,6 +240,20 @@ mod tests {
         d.join("encoder_model.onnx").exists().then_some(d)
     }
 
+    /// Read a 16 kHz mono 16-bit PCM fixture into f32 samples (the format the
+    /// checked-in test WAVs use), so tests need no WAV loader in the shipped lib.
+    fn load_fixture_16k(path: &str) -> Vec<f32> {
+        let mut reader = hound::WavReader::open(path).unwrap();
+        let spec = reader.spec();
+        assert_eq!(spec.channels, 1, "fixture must be mono");
+        assert_eq!(spec.sample_rate, 16000, "fixture must be 16 kHz");
+        let max = (1i64 << (spec.bits_per_sample - 1)) as f32;
+        reader
+            .samples::<i32>()
+            .map(|s| s.unwrap() as f32 / max)
+            .collect()
+    }
+
     #[test]
     fn generate_produces_tokens_ending_in_eos() {
         let Some(dir) = base_dir() else {
@@ -247,10 +261,7 @@ mod tests {
             return;
         };
         let mut m = MoonshineModel::load("moonshine-base", &dir).unwrap();
-        let samples = crate::stt::load_wav_as_16k_mono(std::path::Path::new(
-            "tests/fixtures/moonshine_hello.wav",
-        ))
-        .unwrap();
+        let samples = load_fixture_16k("tests/fixtures/moonshine_hello.wav");
         let toks = m.generate(&samples).unwrap();
         assert!(toks.first() == Some(&DECODER_START));
         assert!(
@@ -267,10 +278,7 @@ mod tests {
         };
         let eng = MoonshineEngine::load("moonshine-base", &dir).unwrap();
         assert!(eng.is_ready());
-        let samples = crate::stt::load_wav_as_16k_mono(std::path::Path::new(
-            "tests/fixtures/moonshine_hello.wav",
-        ))
-        .unwrap();
+        let samples = load_fixture_16k("tests/fixtures/moonshine_hello.wav");
         let text = eng.transcribe(&samples).unwrap().to_lowercase();
         assert!(
             text.contains("hello") && text.contains("test"),

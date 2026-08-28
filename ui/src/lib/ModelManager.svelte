@@ -45,7 +45,7 @@
     <span class="leaf-rule"></span>
   </div>
   <ul class="list">
-    {#each models.filter((m) => m.kind === "whisper") as m}
+    {#each models.filter((m) => m.kind === "stt") as m}
       {@render modelRow(m)}
     {/each}
   </ul>
