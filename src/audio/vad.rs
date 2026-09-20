@@ -112,6 +112,9 @@ impl VoiceActivityDetector for VadPipeline {
                     for buf in &self.frame_buffer {
                         self.temp_out.extend(buf);
                     }
+                    // Every buffered frame is now committed. Keeping it in the
+                    // prefill ring would replay it if speech stops and resumes.
+                    self.frame_buffer.clear();
                     Ok(VadFrame::Speech(&self.temp_out))
                 } else {
                     Ok(VadFrame::Noise)
@@ -120,12 +123,14 @@ impl VoiceActivityDetector for VadPipeline {
             // Ongoing speech
             (true, true) => {
                 self.hangover_counter = self.hangover_frames;
+                self.frame_buffer.clear();
                 Ok(VadFrame::Speech(frame))
             }
             // End of speech (hangover)
             (true, false) => {
                 if self.hangover_counter > 0 {
                     self.hangover_counter -= 1;
+                    self.frame_buffer.clear();
                     Ok(VadFrame::Speech(frame))
                 } else {
                     self.in_speech = false;
@@ -289,6 +294,74 @@ mod tests {
         assert!(is_speech(&mut vad), "hangover frame 1");
         assert!(is_speech(&mut vad), "hangover frame 2");
         assert!(!is_speech(&mut vad), "hangover exhausted -> noise");
+    }
+
+    #[test]
+    fn speech_restart_does_not_reemit_prior_frames() {
+        let mut vad = smoothed(vec![true, false, false, true], 3, 1, 1);
+        let mut emitted = Vec::new();
+
+        for id in 1..=4 {
+            let frame = [id as f32; 4];
+            if let VadFrame::Speech(samples) = vad.push_frame(&frame).unwrap() {
+                emitted.extend(samples.iter().step_by(frame.len()).copied());
+            }
+        }
+
+        assert_eq!(
+            emitted,
+            vec![1.0, 2.0, 3.0, 4.0],
+            "every input frame must be emitted at most once across a speech boundary"
+        );
+    }
+
+    #[test]
+    fn continuous_speech_preserves_every_frame_including_repetition() {
+        let frame_count = 100;
+        let mut vad = smoothed(vec![true; frame_count], 3, 1, 1);
+        let repeated_frame = [0.25; 4];
+        let mut emitted_samples = 0;
+
+        for _ in 0..frame_count {
+            if let VadFrame::Speech(samples) = vad.push_frame(&repeated_frame).unwrap() {
+                emitted_samples += samples.len();
+            }
+        }
+
+        assert_eq!(emitted_samples, frame_count * repeated_frame.len());
+    }
+
+    #[test]
+    fn reset_discards_uncommitted_prefill_from_previous_session() {
+        let mut vad = smoothed(vec![false, true], 2, 0, 1);
+
+        assert!(matches!(
+            vad.push_frame(&[1.0; 4]).unwrap(),
+            VadFrame::Noise
+        ));
+        vad.reset();
+
+        assert!(matches!(
+            vad.push_frame(&[2.0; 4]).unwrap(),
+            VadFrame::Noise
+        ));
+        match vad.push_frame(&[3.0; 4]).unwrap() {
+            VadFrame::Speech(samples) => {
+                let frame_ids: Vec<f32> = samples.iter().step_by(4).copied().collect();
+                assert_eq!(frame_ids, vec![2.0, 3.0]);
+            }
+            VadFrame::Noise => panic!("second-session speech should trigger"),
+        }
+    }
+
+    #[test]
+    fn silence_emits_no_audio() {
+        let frame_count = 20;
+        let mut vad = smoothed(vec![false; frame_count], 3, 1, 1);
+
+        for _ in 0..frame_count {
+            assert!(matches!(vad.push_frame(&FRAME).unwrap(), VadFrame::Noise));
+        }
     }
 
     #[test]
