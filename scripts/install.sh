@@ -43,7 +43,7 @@ if [[ ! -w "$INSTALL_DIR" ]]; then
 fi
 
 command -v curl    >/dev/null 2>&1 || die "curl is required."
-command -v hdiutil >/dev/null 2>&1 || die "hdiutil is required (macOS built-in)."
+command -v diskutil >/dev/null 2>&1 || die "diskutil is required (macOS built-in)."
 command -v xattr   >/dev/null 2>&1 || die "xattr is required (macOS built-in)."
 
 # --- find the latest release DMG -------------------------------------------
@@ -77,7 +77,7 @@ ok "Latest release: ${VERSION}"
 
 # --- download ----------------------------------------------------------------
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"; hdiutil detach "$MOUNT" -quiet 2>/dev/null || true' EXIT
+trap 'rm -rf "$TMPDIR"; if [[ -n "${MOUNT:-}" ]]; then diskutil eject "$MOUNT" >/dev/null 2>&1 || true; fi' EXIT
 
 DMG_PATH="${TMPDIR}/${DMG_NAME}"
 info "Downloading ${DMG_NAME}…"
@@ -86,9 +86,9 @@ ok "Downloaded to ${DMG_PATH}"
 
 # --- mount -------------------------------------------------------------------
 info "Mounting disk image…"
-# hdiutil prints a table; the mount point is the last /Volumes/... column.
+# diskutil prints a table; the mount point is the last /Volumes/... column.
 # Capture full output first so pipefail doesn't abort on grep no-match.
-ATTACH_OUT=$(hdiutil attach "$DMG_PATH" -nobrowse || true)
+ATTACH_OUT=$(diskutil image attach --nobrowse "$DMG_PATH" || true)
 MOUNT=$(echo "$ATTACH_OUT" | grep -oE '/Volumes/.*' | tail -1 | sed 's/[[:space:]]*$//' || true)
 [[ -n "$MOUNT" && -d "$MOUNT" ]] || die "Could not mount the disk image."
 ok "Mounted at ${MOUNT}"

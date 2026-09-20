@@ -21,6 +21,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate macOS installer
+        if: matrix.platform == 'macos-14'
+        run: bash scripts/test-install.sh
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
