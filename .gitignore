@@ -31,6 +31,8 @@ docs/*
 !docs/INTENT_EXTRACTION_TEST_RESULTS.md
 !docs/RELEASING.md
 !docs/signing.md
+!docs/USAGE.md
+!docs/DEVELOPMENT.md
 
 # Root-level planning notes
 /PLAN.md

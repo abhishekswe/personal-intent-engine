@@ -1,142 +1,69 @@
-# PIE Architecture Document
+# PIE architecture
 
-## Overview
+PIE is a Rust library and CLI with a Tauri desktop application. The desktop app captures speech, transcribes it locally, corrects vocabulary, optionally extracts intent with an LLM, and pastes the result into the active application.
 
-PIE (Personal Intent Engine) is a Rust library + CLI that acts as intelligent middleware
-between humans and AI models. It extracts intent from speech/text, maintains personal
-memory, optimizes prompts, and routes them to any LLM.
+## Data flow
 
-## Data Flow
-
-```
-User Input (Voice/Text)
-        |
-        v
-  [Speech-to-Text] (whisper.cpp)  -- optional, can use text directly
-        |
-        v
-  [Intent Extractor] (rule-based + small model)
-        |
-        v
-  [Personal Memory] (JSON file, evolves over time)
-        |
-        v
-  [Prompt Optimizer] (compact / balanced / enhanced / adaptive)
-        |
-        v
-  [LLM Router] (OpenAI-compatible API)
-        |
-        v
-  Any LLM (GPT / Claude / Gemini / Qwen / Local)
+```text
+Microphone or text
+        ↓
+Audio capture → resampling → voice activity detection
+        ↓
+Local speech-to-text (Moonshine)
+        ↓
+Vocabulary correction
+        ↓
+Intent extraction and prompt optimization
+        ↓
+Paste at cursor, save to local history, or send to a configured LLM
 ```
 
-## Module Architecture
+Short, direct input stays on the deterministic fast path. Longer or question-shaped input can use LLM-backed extraction when Enhanced mode is selected or Auto mode chooses it. If the LLM is unavailable or returns invalid output, intent extraction falls back to the local rule-based path.
 
-### 1. Audio Module (src/audio/)
-Real-time audio capture using cpal.
+## Components
 
-**Components:**
-- `AudioRecorder` — cpal-based streaming recorder with worker thread
-- `SmoothedVad` — Voice Activity Detection with onset/hangover/prefill
-- `FrameResampler` — rubato-based resampling to 16kHz mono
+### Core library (`src/`)
 
-**Key Design:**
-- Dedicated worker thread for audio processing
-- Channel-based communication (mpsc)
-- Cached device config to avoid HAL round-trips
-- VAD filters silence in real-time
+- `audio/` captures audio with cpal, resamples to 16 kHz mono, and filters silence with Silero VAD.
+- `stt/` exposes the `SttEngine` seam and the Moonshine adapter.
+- `corrector/` applies built-in, personal, phonetic, learned, and optional LLM-assisted corrections.
+- `intent/` classifies input and extracts objectives, context, constraints, and questions.
+- `optimizer/` produces Direct or Enhanced output.
+- `memory/` stores the local profile and communication patterns.
+- `history/` stores recent recordings in SQLite.
+- `llm/` routes requests to OpenAI-compatible providers behind `LlmClient`.
+- `pipeline/` wires the full processing flow through `PieEngine`.
 
-### 2. STT Module (src/stt/)
-Speech-to-Text engine. Currently a stub — will integrate whisper.cpp.
+External capabilities are isolated behind traits:
 
-**Interface:**
-```rust
-pub trait SttEngine: Send + Sync {
-    fn transcribe(&self, samples: &[f32]) -> anyhow::Result<String>;
-    fn is_ready(&self) -> bool;
-}
-```
+| Capability | Trait | Production adapter |
+|---|---|---|
+| Audio capture | `AudioCapture` | `AudioRecorder` |
+| Voice activity | `VoiceActivityDetector` | `SileroVad` or `EnergyVad` |
+| Speech-to-text | `SttEngine` | `MoonshineEngine` |
+| LLM completion | `LlmClient` | `RouterLlmClient` |
 
-### 3. Intent Module (src/intent/)
-Core PIE logic. Extracts structured intent from text.
+### Desktop (`src-tauri/`)
 
-**Components:**
-- `IntentExtractor` — Rule-based extraction (Phase 1)
-- `Intent` schema — Objective, context, constraints, confidence, etc.
-- `classifier` — Conversation type detection
+The Tauri shell owns the global toggle shortcut, recording lifecycle, model downloads, permissions, local settings, history commands, clipboard paste, and platform integration. The shortcut and UI call the same recording functions so behavior stays consistent.
 
-**Intent Schema:**
-```rust
-struct Intent {
-    objective: String,
-    context: Vec<String>,
-    constraints: Vec<String>,
-    questions: Vec<String>,
-    confidence: IntentConfidence,
-    conversation_type: ConversationType,
-    topics: Vec<String>,
-}
-```
+### Interface (`ui/`)
 
-### 4. Memory Module (src/memory/)
-Personal memory that evolves over time.
+The Svelte app provides the recording result, model management, history, vocabulary, transcription behavior, LLM configuration, and shortcut settings. A small overlay reflects recording and processing state.
 
-**Components:**
-- `MemoryStore` — JSON-based storage with atomic writes
-- `UserProfile` — Role, technologies, preferences
-- `CommunicationPatterns` — Learned behavior
+## Storage and network boundaries
 
-**Storage:** ~/.config/pie/memory.json
+PIE stores settings and history in the operating system's application-data directory, vocabulary in local JSON files, and speech/VAD models under `~/.cache/pie/models`.
 
-### 5. Optimizer Module (src/optimizer/)
-Prompt optimization with four modes.
+Audio and local transcription do not leave the machine. Network access occurs for model downloads and when the user invokes a feature backed by their configured LLM endpoint.
 
-**Modes:**
-- `compact` — Minimize tokens, remove filler
-- `balanced` — Keep context, remove noise (default)
-- `enhanced` — Enrich with missing context
-- `adaptive` — Auto-select based on input characteristics
+## Design constraints
 
-### 6. LLM Module (src/llm/)
-LLM provider routing.
+- Core behavior belongs in the library; the CLI and desktop are adapters.
+- Heavy or optional dependencies remain feature-gated where practical.
+- External services and hardware integrations stay behind traits.
+- Direct and Enhanced are the only optimization behaviors; Auto selects between them.
+- Legacy mode strings remain accepted by the pipeline and map to automatic selection.
+- Tests use fake adapters and never call an external LLM.
 
-**Components:**
-- `OpenAiClient` — OpenAI-compatible API client
-- `LlmRouter` — Provider selection and routing
-
-### 7. Pipeline Module (src/pipeline/)
-Full pipeline orchestration.
-
-**Components:**
-- `PieEngine` — Wires everything together
-- `PieResult` — Intent + optimized prompt + metadata
-
-## Build Phases
-
-### Phase 1 (Current) — Text Pipeline
-- [x] Project structure
-- [x] Intent extraction (rule-based)
-- [x] Memory store (JSON)
-- [x] Prompt optimizer (all modes)
-- [x] LLM router (OpenAI-compatible)
-- [x] CLI entry point
-- [ ] Compilation and testing
-
-### Phase 2 — Voice Input
-- [ ] Audio capture (cpal)
-- [ ] VAD (Silero ONNX)
-- [ ] STT (whisper.cpp integration)
-- [ ] Streaming transcription
-
-### Phase 3 — Desktop UI (Tauri)
-- [ ] Tauri app shell
-- [ ] React frontend
-- [ ] Recording overlay
-- [ ] Settings UI
-- [ ] Model management
-
-### Phase 4 — Intelligence
-- [ ] Small local model for intent extraction
-- [ ] Communication pattern learning
-- [ ] Adaptive optimization
-- [ ] Multi-language support
+See [DEVELOPMENT.md](DEVELOPMENT.md) for build and verification commands.

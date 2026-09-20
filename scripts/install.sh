@@ -1,7 +1,7 @@
 #!/bin/bash
 # PIE install script — downloads the latest release and installs PIE.app to
 # /Applications, stripping the macOS quarantine attribute so Gatekeeper does not
-# block the (ad-hoc signed) app on first launch.
+# block the self-signed app on first launch.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/abhishekswe/personal-intent-engine/main/scripts/install.sh | bash
@@ -34,7 +34,7 @@ fi
 ARCH="$(uname -m)"
 if [[ "$ARCH" != "arm64" ]]; then
   die "PIE releases are currently Apple Silicon (arm64) only. Found: $ARCH.
-Build from source on other archs: https://github.com/${OWNER}/${REPO}#quick-start-desktop-app"
+Build from source on other archs: https://github.com/${OWNER}/${REPO}/blob/main/docs/DEVELOPMENT.md"
 fi
 
 # Need write access to /Applications
@@ -115,7 +115,7 @@ info "Copying ${APP_BUNDLE} to ${INSTALL_DIR}…"
 cp -R "$SRC_APP" "$DEST_APP"
 ok "Installed ${DEST_APP}"
 
-# --- strip quarantine so Gatekeeper does not block the ad-hoc signed app -----
+# --- strip quarantine so Gatekeeper does not block the self-signed app --------
 info "Removing Gatekeeper quarantine attribute…"
 xattr -cr "$DEST_APP"
 if xattr -l "$DEST_APP" 2>/dev/null | grep -q "com.apple.quarantine"; then
@@ -131,8 +131,7 @@ printf '\n%s\n' "Next steps:"
 printf '  1. %s\n' "Launch PIE from Applications (or Spotlight):  open -a PIE"
 printf '  2. %s\n' "On first run, macOS asks for Microphone and Accessibility permission."
 printf '     %s\n' "Grant both — Accessibility is needed to paste the prompt at your cursor."
-printf '  3. %s\n' "Open the Models tab and download a whisper model (start with Whisper Tiny)"
-printf '     %s\n' "and Silero VAD."
-printf '  4. %s\n' "Press ⌘⇧Space (rebindable) in any app to start recording."
+printf '  3. %s\n' "Open Models and download Moonshine Base (recommended) or Tiny, plus Silero VAD."
+printf '  4. %s\n' "Press Ctrl+Space in any app to start; press it again to finish and paste."
 printf '\nDocs:  https://github.com/%s/%s\n' "${OWNER}" "${REPO}"
 printf 'Issues: https://github.com/%s/%s/issues\n\n' "${OWNER}" "${REPO}"
