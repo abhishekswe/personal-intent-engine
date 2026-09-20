@@ -8,6 +8,7 @@
   import ModelManager from "./lib/ModelManager.svelte";
   import TranscriptionSettings from "./lib/TranscriptionSettings.svelte";
   import LLMSettings from "./lib/LLMSettings.svelte";
+  import HotkeyRecorder from "./lib/HotkeyRecorder.svelte";
   import HistorySettings from "./lib/HistorySettings.svelte";
   import VocabularySettings from "./lib/VocabularySettings.svelte";
   import VocabularySync from "./lib/VocabularySync.svelte";
@@ -32,6 +33,7 @@
     llm_api_url: "",
     llm_api_key: "",
     llm_model: "",
+    hotkey: "",
     history_limit: 10,
     deep_correct_ai: false,
     code_mode: false,
@@ -84,7 +86,10 @@
       saved = true;
       clearTimeout(savedTimer);
       savedTimer = setTimeout(() => { saved = false; }, 1500);
-    } catch (e) { error = String(e); }
+    } catch (e) {
+      error = String(e);
+      settings = await invoke("get_settings").catch(() => settings);
+    }
   }
 
   async function toggleRecording() {
@@ -263,21 +268,12 @@
       onReloadModels={loadModels}
     />
   {:else if view === "setup"}
-    <!-- Hold ⌥ to talk is the whole interaction, so it opens the section. -->
-    <section class="leaf">
-      <div class="leaf-head">
-        <span class="leaf-label">How to talk</span>
-        <span class="leaf-rule"></span>
-      </div>
-      <div class="field">
-        <span class="keys keys-hero"><kbd>⌥</kbd></span>
-        <p class="note">
-          Hold the Option (⌥) key to record, release to paste at your cursor.
-          Works in any app. Turn on “Enhance with AI” in Lexicon to paste an
-          AI-rewritten prompt instead of the plain transcript.
-        </p>
-      </div>
-    </section>
+    <HotkeyRecorder
+      {settings}
+      onSave={save}
+      onError={(e) => { error = e; }}
+      defaultValue="Control+Space"
+    />
     <TranscriptionSettings {settings} onSave={save} />
     <LLMSettings {settings} onSave={save} />
     <HistorySettings {settings} onSave={save} />

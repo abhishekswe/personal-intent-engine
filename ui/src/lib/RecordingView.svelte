@@ -134,7 +134,7 @@
            This teaches the result's structure and gives the empty state
            something to be besides a void. -->
       <div class="placeholder">
-        <p class="placeholder-lead">Hold ⌥ or press record to start.</p>
+        <p class="placeholder-lead">Use your shortcut or press record to start.</p>
         <dl class="guide">
           <div>
             <dt>Heard</dt>
@@ -166,8 +166,7 @@
   >
     {#if recState === "idle"}
       <div class="bar-keys">
-        <span class="keys keys-hero"><kbd>⌥</kbd></span>
-        <span class="bar-caption">hold to talk</span>
+        <span class="bar-caption">press shortcut to talk</span>
       </div>
     {:else}
       <div class="bar-live">

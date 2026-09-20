@@ -25,6 +25,8 @@ pub struct Settings {
     pub llm_api_url: String,
     /// API key / bearer token for BYOK (empty = none / local server).
     pub llm_api_key: String,
+    /// Global shortcut that toggles dictation on and off.
+    pub hotkey: String,
     /// Max number of recordings kept in the history store (hard cap).
     pub history_limit: usize,
     /// When true, run the opt-in LLM deep-correct pass on every transcript.
@@ -57,6 +59,7 @@ impl Default for Settings {
             llm_model: String::new(),
             llm_api_url: String::new(),
             llm_api_key: String::new(),
+            hotkey: default_hotkey().to_string(),
             history_limit: 10,
             deep_correct_ai: false,
             background_mining: false,
@@ -64,6 +67,10 @@ impl Default for Settings {
             enhance_with_ai: false,
         }
     }
+}
+
+pub const fn default_hotkey() -> &'static str {
+    "Control+Space"
 }
 
 /// Default to a model already present in ~/.cache/pie/models, else empty.
@@ -90,14 +97,36 @@ impl Settings {
     pub fn load() -> Self {
         let path = settings_path();
         match std::fs::read_to_string(&path) {
-            // Unknown/legacy keys (old `hotkey*`, `paste_output`, ...) are
-            // ignored by serde; missing keys fall back to defaults.
-            Ok(json) => serde_json::from_str(&json).unwrap_or_else(|e| {
-                log::warn!("Failed to parse settings ({e}); using defaults");
-                Self::default()
-            }),
+            Ok(json) => Self::from_json_migrating(&json),
             Err(_) => Self::default(),
         }
+    }
+
+    /// Parse settings and collapse the former raw/optimized bindings into the
+    /// single dictation toggle. Raw wins because voice-to-text is the default.
+    pub fn from_json_migrating(json: &str) -> Self {
+        let mut settings: Self = serde_json::from_str(json).unwrap_or_else(|e| {
+            log::warn!("Failed to parse settings ({e}); using defaults");
+            Self::default()
+        });
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(json) {
+            if value.get("hotkey").is_none() {
+                let legacy = value
+                    .get("hotkey_raw")
+                    .and_then(|v| v.as_str())
+                    .filter(|v| !v.trim().is_empty())
+                    .or_else(|| {
+                        value
+                            .get("hotkey_optimized")
+                            .and_then(|v| v.as_str())
+                            .filter(|v| !v.trim().is_empty())
+                    });
+                if let Some(hotkey) = legacy {
+                    settings.hotkey = hotkey.to_string();
+                }
+            }
+        }
+        settings
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -144,6 +173,31 @@ mod tests {
     }
 
     #[test]
+    fn hotkey_uses_platform_default() {
+        let s = Settings::default();
+        assert_eq!(s.hotkey, "Control+Space");
+    }
+
+    #[test]
+    fn hotkey_roundtrips() {
+        let s = Settings {
+            hotkey: "Control+Shift+Space".into(),
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.hotkey, "Control+Shift+Space");
+    }
+
+    #[test]
+    fn migrates_legacy_raw_hotkey() {
+        let loaded = Settings::from_json_migrating(
+            r#"{"hotkey_raw":"Command+Shift+KeyV","hotkey_optimized":"Command+Shift+Space"}"#,
+        );
+        assert_eq!(loaded.hotkey, "Command+Shift+KeyV");
+    }
+
+    #[test]
     fn stale_whisper_model_key_is_ignored() {
         // Older installs persisted `whisper_model`; it's not a field anymore,
         // so it's silently dropped and `stt_model` falls back to default.
@@ -178,17 +232,6 @@ mod tests {
         let expanded = Settings::expand("~/models/x.bin");
         assert!(!expanded.to_string_lossy().starts_with('~'));
         assert!(expanded.to_string_lossy().ends_with("models/x.bin"));
-    }
-
-    #[test]
-    fn legacy_hotkey_keys_are_ignored() {
-        // Old installs persisted `hotkey*` / `paste_output`; those keys no
-        // longer exist, so serde drops them and parsing still succeeds.
-        let loaded: Settings = serde_json::from_str(
-            r#"{"hotkey_raw":"CmdOrCtrl+Shift+V","paste_output":"prompt","mode":"compact"}"#,
-        )
-        .unwrap();
-        assert_eq!(loaded.mode, "compact");
     }
 
     #[test]

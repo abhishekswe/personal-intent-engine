@@ -1,6 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod hold_key;
 mod models;
 #[cfg(target_os = "macos")]
 mod nspanel;
@@ -16,6 +15,7 @@ use serde::Serialize;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 use paste::EnigoState;
 use pie_engine::audio::{
@@ -306,35 +306,81 @@ async fn transcribe_and_process(app: &AppHandle, samples: Vec<f32>) -> Result<Ou
     Ok(outcome)
 }
 
-/* ─── push-to-talk (hold ⌥) ─── */
+/* ─── global dictation shortcut ─── */
 
-/// Start a push-to-talk recording. Errors (already recording, still busy) are
-/// expected under key-repeat and only logged.
-#[cfg(target_os = "macos")]
-pub(crate) fn ptt_start(app: &AppHandle) {
-    if let Err(e) = do_start_recording(app) {
-        log::debug!("PTT start skipped: {e}");
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HotkeyAction {
+    Start,
+    Stop,
+    Ignore,
+}
+
+fn hotkey_action(recording: bool, busy: bool) -> HotkeyAction {
+    if busy {
+        HotkeyAction::Ignore
+    } else if recording {
+        HotkeyAction::Stop
+    } else {
+        HotkeyAction::Start
     }
 }
 
-/// Release of ⌥ while a PTT recording is live: stop, transcribe, and paste.
-#[cfg(target_os = "macos")]
-pub(crate) fn ptt_stop(app: &AppHandle) {
-    spawn_stop_and_paste(app);
+/// Toggle dictation from any app: first press starts, second press finishes and
+/// pastes. Presses during transcription are deliberately ignored.
+fn on_hotkey(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        log::error!("hotkey: app state unavailable");
+        return;
+    };
+    let recording = state
+        .recorder
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some();
+    match hotkey_action(recording, state.busy.load(Ordering::Acquire)) {
+        HotkeyAction::Start => {
+            if let Err(e) = do_start_recording(app) {
+                log::warn!("Hotkey start failed: {e}");
+                emit_event(app, "pie://error", e);
+            }
+        }
+        HotkeyAction::Stop => spawn_stop_and_paste(app),
+        HotkeyAction::Ignore => log::debug!("Hotkey ignored while transcription is busy"),
+    }
 }
 
-/// Abort a PTT recording without transcribing (a key was pressed mid-hold, so
-/// the user was typing a ⌥ shortcut rather than dictating).
-#[cfg(target_os = "macos")]
-pub(crate) fn ptt_cancel(app: &AppHandle) {
-    do_cancel_recording(app);
+fn register_hotkey(app: &AppHandle, hotkey: &str) -> Result<(), String> {
+    let shortcut: Shortcut = hotkey
+        .trim()
+        .parse()
+        .map_err(|e| format!("Invalid dictation shortcut '{hotkey}': {e}"))?;
+    app.global_shortcut()
+        .on_shortcut(shortcut, |app, fired, event| {
+            if event.state() == ShortcutState::Pressed {
+                log::debug!("Dictation shortcut fired: {fired:?}");
+                on_hotkey(app);
+            }
+        })
+        .map_err(|e| format!("Could not register dictation shortcut '{hotkey}': {e}"))
+}
+
+fn replace_hotkey(app: &AppHandle, old: &str, new: &str) -> Result<(), String> {
+    app.global_shortcut()
+        .unregister_all()
+        .map_err(|e| e.to_string())?;
+    if let Err(error) = register_hotkey(app, new) {
+        if let Err(restore_error) = register_hotkey(app, old) {
+            log::error!("Failed to restore prior shortcut '{old}': {restore_error}");
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Stop the active recording, transcribe/process it, then paste the result into
 /// whichever app has focus. The pasted text is the AI-optimized prompt when
 /// "Enhance with AI" is on, and the corrected voice-to-text transcript
 /// otherwise (the two are identical on the fast path).
-#[cfg(target_os = "macos")]
 fn spawn_stop_and_paste(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -392,17 +438,31 @@ fn get_settings(state: State<'_, AppState>) -> Settings {
 
 #[tauri::command]
 async fn update_settings(
+    app: AppHandle,
     state: State<'_, AppState>,
     settings: Settings,
 ) -> Result<(), String> {
-    let (llm_changed, code_mode_changed) = {
+    let (llm_changed, code_mode_changed, previous_hotkey) = {
         let current = state.settings.lock().unwrap_or_else(|e| e.into_inner());
         let llm = current.llm_api_url != settings.llm_api_url
             || current.llm_api_key != settings.llm_api_key
             || current.llm_model != settings.llm_model;
-        (llm, current.code_mode != settings.code_mode)
+        (
+            llm,
+            current.code_mode != settings.code_mode,
+            current.hotkey.clone(),
+        )
     };
-    settings.save().map_err(|e| e.to_string())?;
+    let hotkey_changed = previous_hotkey != settings.hotkey;
+    if hotkey_changed {
+        replace_hotkey(&app, &previous_hotkey, &settings.hotkey)?;
+    }
+    if let Err(error) = settings.save() {
+        if hotkey_changed {
+            let _ = replace_hotkey(&app, &settings.hotkey, &previous_hotkey);
+        }
+        return Err(error.to_string());
+    }
     if llm_changed || code_mode_changed {
         let mut engine = state.engine.lock().await;
         if llm_changed {
@@ -413,6 +473,28 @@ async fn update_settings(
         }
     }
     *state.settings.lock().unwrap_or_else(|e| e.into_inner()) = settings;
+    Ok(())
+}
+
+/// Suspend the current shortcut while the Setup UI records a replacement.
+#[tauri::command]
+fn set_hotkey_active(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    active: bool,
+) -> Result<(), String> {
+    app.global_shortcut()
+        .unregister_all()
+        .map_err(|e| e.to_string())?;
+    if active {
+        let hotkey = state
+            .settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .hotkey
+            .clone();
+        register_hotkey(&app, &hotkey)?;
+    }
     Ok(())
 }
 
@@ -1033,8 +1115,9 @@ fn main() {
     env_logger::init();
 
     #[allow(unused_mut)]
-    let mut builder =
-        tauri::Builder::default().plugin(tauri_plugin_clipboard_manager::init());
+    let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build());
     // macOS overlay is an NSPanel created directly in overlay.rs (see the
     // vendored nspanel module) — no external plugin needed.
 
@@ -1102,8 +1185,16 @@ fn main() {
                 tauri::async_runtime::spawn(async move { learner.run().await });
             }
 
-            // Hold ⌥ to talk (push-to-talk). macOS-only; a no-op elsewhere.
-            hold_key::install(app.handle());
+            let hotkey = app
+                .state::<AppState>()
+                .settings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .hotkey
+                .clone();
+            if let Err(e) = register_hotkey(app.handle(), &hotkey) {
+                log::error!("{e}");
+            }
 
             // Floating indicator, created hidden and shown per recording state.
             // Creating the NSPanel overlay temporarily flips the app activation
@@ -1175,6 +1266,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             update_settings,
+            set_hotkey_active,
             start_recording,
             stop_recording,
             cancel_recording,
@@ -1202,4 +1294,40 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running PIE");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{hotkey_action, HotkeyAction};
+    use tauri_plugin_global_shortcut::Shortcut;
+
+    #[test]
+    fn hotkey_starts_when_idle() {
+        assert_eq!(hotkey_action(false, false), HotkeyAction::Start);
+    }
+
+    #[test]
+    fn hotkey_stops_when_recording() {
+        assert_eq!(hotkey_action(true, false), HotkeyAction::Stop);
+    }
+
+    #[test]
+    fn hotkey_is_ignored_while_busy() {
+        assert_eq!(hotkey_action(false, true), HotkeyAction::Ignore);
+    }
+
+    #[test]
+    fn supported_shortcuts_parse() {
+        for value in [
+            "Control+Space",
+            "Control+Shift+Space",
+            "Alt+KeyD",
+            "CmdOrCtrl+Shift+KeyV",
+        ] {
+            assert!(
+                value.parse::<Shortcut>().is_ok(),
+                "shortcut should parse: {value}"
+            );
+        }
+    }
 }

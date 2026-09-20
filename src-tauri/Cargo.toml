@@ -11,6 +11,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # tray-icon: system tray; macos-private-api: transparent overlay window.
 tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
+tauri-plugin-global-shortcut = "2"
 tauri-plugin-clipboard-manager = "2"
 enigo = "0.6"
 serde = { version = "1", features = ["derive"] }
@@ -38,8 +39,5 @@ pie-engine = { path = "..", default-features = false, features = ["vad"] }
 # objc2 (see src/nspanel.rs), so PIE owns this code with no external plugin.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-# `block2` feature: the ⌥ push-to-talk monitor (src/hold_key.rs) uses
-# NSEvent::addGlobalMonitorForEventsMatchingMask_handler, which takes a block.
-objc2-app-kit = { version = "0.3", features = ["block2"] }
+objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
-block2 = "0.6"
