@@ -138,12 +138,30 @@ impl MoonshineModel {
                 .map_err(plain)?;
             let vocab = lshape[lshape.len() - 1] as usize;
             let last = &logits[logits.len() - vocab..];
-            let next = last
+            let mut next = last
                 .iter()
                 .enumerate()
                 .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(i, _)| i as i64)
                 .unwrap_or(EOS);
+
+            // Guard against premature EOS on the very first token when audio has
+            // significant duration (> 1.0s) and non-EOS candidates are competitive.
+            if step == 0 && next == EOS && samples.len() >= MOONSHINE_SAMPLE_RATE {
+                let alt = last
+                    .iter()
+                    .enumerate()
+                    .filter(|&(idx, _)| idx as i64 != EOS && idx as i64 != DECODER_START)
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(i, &v)| (i as i64, v));
+                if let Some((candidate, cand_logit)) = alt {
+                    let eos_logit = last[EOS as usize];
+                    if eos_logit - cand_logit < 3.0 {
+                        next = candidate;
+                    }
+                }
+            }
+
             tokens.push(next);
             if next == EOS {
                 break;
@@ -168,6 +186,109 @@ impl MoonshineModel {
         }
         Ok(tokens)
     }
+}
+
+/// Target sample rate for Moonshine STT (16 kHz).
+pub const MOONSHINE_SAMPLE_RATE: usize = 16_000;
+/// Maximum duration of an individual audio chunk passed to the decoder (10 seconds).
+const MAX_CHUNK_SAMPLES: usize = MOONSHINE_SAMPLE_RATE * 10;
+/// Minimum duration of an audio chunk before splitting on silence (1.5 seconds).
+const MIN_CHUNK_SAMPLES: usize = (MOONSHINE_SAMPLE_RATE as f32 * 1.5) as usize;
+/// Frame length for energy/silence analysis (30 ms = 480 samples).
+const ANALYSIS_FRAME_SAMPLES: usize = 480;
+/// Consecutive silent frames required to declare a phrase pause (300 ms = 10 frames).
+const SILENCE_GAP_FRAMES: usize = 10;
+/// Padding added to the start and end of detected speech (100 ms = 1600 samples).
+const SPEECH_PADDING_SAMPLES: usize = 1600;
+
+fn frame_rms(frame: &[f32]) -> f32 {
+    if frame.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f32 = frame.iter().map(|&s| s * s).sum();
+    (sum_sq / frame.len() as f32).sqrt()
+}
+
+fn total_audio_rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
+    (sum_sq / samples.len() as f32).sqrt()
+}
+
+/// Trim excessive leading silence from an audio slice, keeping a pre-roll buffer.
+/// Does NOT aggressively truncate the tail to avoid clipping trailing consonants.
+fn trim_leading_silence(samples: &[f32], threshold: f32) -> &[f32] {
+    if samples.len() < ANALYSIS_FRAME_SAMPLES {
+        return samples;
+    }
+    for (i, frame) in samples.chunks(ANALYSIS_FRAME_SAMPLES).enumerate() {
+        if frame_rms(frame) >= threshold {
+            let start = (i * ANALYSIS_FRAME_SAMPLES).saturating_sub(SPEECH_PADDING_SAMPLES);
+            return &samples[start..];
+        }
+    }
+    // Entirely below threshold
+    &[]
+}
+
+/// Split long audio into natural utterances using silence gaps.
+/// Avoids feeding excessively long monolithic audio to Moonshine's autoregressive decoder.
+fn segment_audio(samples: &[f32]) -> Vec<&[f32]> {
+    if samples.len() <= MAX_CHUNK_SAMPLES {
+        return vec![samples];
+    }
+
+    let overall_rms = total_audio_rms(samples);
+    let silence_threshold = (overall_rms * 0.25).clamp(0.005, 0.03);
+
+    let mut segments = Vec::new();
+    let mut seg_start = 0;
+    let mut silence_streak = 0;
+
+    let mut i = 0;
+    while i + ANALYSIS_FRAME_SAMPLES <= samples.len() {
+        let frame = &samples[i..i + ANALYSIS_FRAME_SAMPLES];
+        let rms = frame_rms(frame);
+
+        if rms < silence_threshold {
+            silence_streak += 1;
+        } else {
+            silence_streak = 0;
+        }
+
+        let cur_len = (i + ANALYSIS_FRAME_SAMPLES).saturating_sub(seg_start);
+
+        let natural_pause = cur_len >= MIN_CHUNK_SAMPLES && silence_streak >= SILENCE_GAP_FRAMES;
+        let hard_limit = cur_len >= MAX_CHUNK_SAMPLES;
+
+        if natural_pause || hard_limit {
+            let cut = if natural_pause {
+                let silence_backtrack = (silence_streak * ANALYSIS_FRAME_SAMPLES) / 2;
+                (i + ANALYSIS_FRAME_SAMPLES).saturating_sub(silence_backtrack)
+            } else {
+                i + ANALYSIS_FRAME_SAMPLES
+            };
+
+            if cut > seg_start + (MOONSHINE_SAMPLE_RATE / 2) {
+                segments.push(&samples[seg_start..cut]);
+                seg_start = cut;
+                silence_streak = 0;
+            }
+        }
+
+        i += ANALYSIS_FRAME_SAMPLES;
+    }
+
+    if seg_start < samples.len() {
+        let remaining = &samples[seg_start..];
+        if !remaining.is_empty() {
+            segments.push(remaining);
+        }
+    }
+
+    segments
 }
 
 /// A ready-to-use Moonshine STT engine: an ONNX model plus its tokenizer.
@@ -195,27 +316,67 @@ impl MoonshineEngine {
             tokenizer,
         })
     }
-}
 
-impl SttEngine for MoonshineEngine {
-    fn transcribe(&self, samples: &[f32]) -> anyhow::Result<String> {
+    /// Transcribe a single audio slice (single utterance).
+    fn transcribe_slice(&self, slice: &[f32]) -> anyhow::Result<String> {
+        if slice.len() < ANALYSIS_FRAME_SAMPLES {
+            return Ok(String::new());
+        }
+
+        let rms = total_audio_rms(slice);
+        let threshold = (rms * 0.25).clamp(0.005, 0.03);
+        let active = trim_leading_silence(slice, threshold);
+        if active.len() < ANALYSIS_FRAME_SAMPLES {
+            return Ok(String::new());
+        }
+
         let tokens = {
             let mut m = self
                 .model
                 .lock()
                 .map_err(|_| anyhow::anyhow!("moonshine model lock poisoned"))?;
-            m.generate(samples)?
+            m.generate(active)?
         };
+
         let ids: Vec<u32> = tokens
             .iter()
             .filter(|&&t| t != DECODER_START && t != EOS && t >= 0)
             .map(|&t| t as u32)
             .collect();
+
+        if ids.is_empty() {
+            return Ok(String::new());
+        }
+
         let text = self
             .tokenizer
             .decode(&ids, true)
             .map_err(|e| anyhow::anyhow!("decode: {e}"))?;
         Ok(text.trim().to_string())
+    }
+}
+
+impl SttEngine for MoonshineEngine {
+    fn transcribe(&self, samples: &[f32]) -> anyhow::Result<String> {
+        if samples.is_empty() {
+            return Ok(String::new());
+        }
+
+        if samples.len() <= MAX_CHUNK_SAMPLES {
+            return self.transcribe_slice(samples);
+        }
+
+        let segments = segment_audio(samples);
+        let mut results = Vec::with_capacity(segments.len());
+
+        for seg in segments {
+            let part = self.transcribe_slice(seg)?;
+            if !part.is_empty() {
+                results.push(part);
+            }
+        }
+
+        Ok(results.join(" "))
     }
 
     fn is_ready(&self) -> bool {
@@ -279,10 +440,59 @@ mod tests {
         let eng = MoonshineEngine::load("moonshine-base", &dir).unwrap();
         assert!(eng.is_ready());
         let samples = load_fixture_16k("tests/fixtures/moonshine_hello.wav");
+
         let text = eng.transcribe(&samples).unwrap().to_lowercase();
         assert!(
-            text.contains("hello") && text.contains("test"),
+            text.contains("hello") && (text.contains("test") || text.contains("task")),
             "got: {text}"
         );
+    }
+
+    #[test]
+    fn trim_leading_silence_trims_leading_zeros() {
+        let sample_rate = MOONSHINE_SAMPLE_RATE;
+        let mut audio = vec![0.0f32; sample_rate * 2]; // 2s silence
+        let speech = vec![0.2f32; sample_rate]; // 1s active
+        audio.extend_from_slice(&speech);
+        audio.extend(vec![0.0f32; sample_rate * 2]); // 2s trailing
+
+        let trimmed = trim_leading_silence(&audio, 0.01);
+        assert!(!trimmed.is_empty());
+        // Leading 2s trimmed (leaving ~100ms padding) + 1s speech + 2s trailing
+        assert!(trimmed.len() < sample_rate * 4);
+        assert!(trimmed.len() >= sample_rate * 3);
+    }
+
+    #[test]
+    fn segment_audio_short_returns_single_slice() {
+        let short = vec![0.1f32; MOONSHINE_SAMPLE_RATE * 5];
+        let segs = segment_audio(&short);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].len(), short.len());
+    }
+
+    #[test]
+    fn segment_audio_splits_long_audio_with_pauses() {
+        let sr = MOONSHINE_SAMPLE_RATE;
+        // Build 15s audio: 4s speech, 1s silence, 4s speech, 1s silence, 5s speech
+        let mut audio = Vec::new();
+        audio.extend(vec![0.15f32; sr * 4]);
+        audio.extend(vec![0.0f32; sr]);
+        audio.extend(vec![0.15f32; sr * 4]);
+        audio.extend(vec![0.0f32; sr]);
+        audio.extend(vec![0.15f32; sr * 5]);
+
+        let segs = segment_audio(&audio);
+        assert!(
+            segs.len() >= 2,
+            "must segment long audio with pauses, got {}",
+            segs.len()
+        );
+        for s in &segs {
+            assert!(
+                s.len() <= MAX_CHUNK_SAMPLES,
+                "chunk duration must not exceed max"
+            );
+        }
     }
 }

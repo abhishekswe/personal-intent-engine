@@ -311,8 +311,8 @@ impl PieEngine {
         })
     }
 
-    /// Fast voice-to-text path: apply ONLY pronunciation correction (dictionary
-    /// + context-gated phonetic + learned vocab, plus code-phrase translation
+    /// Fast voice-to-text path: apply ONLY pronunciation correction (dictionary,
+    /// context-gated phonetic, learned vocab, plus code-phrase translation
     /// when code mode is on). No intent extraction, no optimization, no LLM
     /// call, and no memory writes — so it stays instant regardless of input
     /// length. Returns the corrected transcript and the fixes that were applied.
